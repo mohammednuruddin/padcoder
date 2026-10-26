@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="128" alt="PadCoder icon">
+
 # PadCoder 🎮
 
 Vibe code with a game controller. PadCoder turns a PS5 DualSense or PS4 DualShock 4

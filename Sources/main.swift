@@ -132,21 +132,10 @@ func makeMainMenu() -> NSMenu {
     return main
 }
 
-/// The orange gamepad badge, used for the Dock and ⌘-Tab while the window is open.
-func makeAppIcon() -> NSImage {
-    NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-        let tile = NSBezierPath(roundedRect: rect.insetBy(dx: 50, dy: 50), xRadius: 92, yRadius: 92)
-        NSGradient(starting: NSColor(srgbRed: 0.96, green: 0.62, blue: 0.47, alpha: 1), ending: claudeOrange)?
-            .draw(in: tile, angle: -90)
-        let config = NSImage.SymbolConfiguration(pointSize: 210, weight: .semibold)
-            .applying(.init(paletteColors: [.white]))
-        if let pad = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config) {
-            let s = pad.size
-            pad.draw(in: NSRect(x: rect.midX - s.width / 2, y: rect.midY - s.height / 2, width: s.width, height: s.height))
-        }
-        return true
-    }
+// `PadCoder --render-icon <dir.iconset>` writes the icon PNGs for build.sh and exits.
+if let i = CommandLine.arguments.firstIndex(of: "--render-icon"), i + 1 < CommandLine.arguments.count {
+    renderIconSet(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    exit(0)
 }
 
 // `PadCoder --snapshot <dir>` renders the UI to PNGs and exits (layout checks without a screen).

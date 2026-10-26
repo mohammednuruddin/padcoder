@@ -6,13 +6,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Build into a temp dir so a failed compile never removes the working app.
-STAGE="$(mktemp -d)/PadCoder.app"
-mkdir -p "$STAGE/Contents/MacOS"
+WORK="$(mktemp -d)"
+STAGE="$WORK/PadCoder.app"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 cp Info.plist "$STAGE/Contents/Info.plist"
 
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
   -framework AppKit -framework GameController -framework CoreHaptics -framework ServiceManagement \
   -o "$STAGE/Contents/MacOS/PadCoder" Sources/*.swift
+
+# The icon is drawn in code (Sources/AppIcon.swift); render it and pack it as an .icns.
+"$STAGE/Contents/MacOS/PadCoder" --render-icon "$WORK/AppIcon.iconset"
+iconutil -c icns "$WORK/AppIcon.iconset" -o "$STAGE/Contents/Resources/AppIcon.icns"
 
 IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development|Developer ID/ {print $2; exit}')
 if [ -n "$IDENTITY" ] && perl -e 'alarm 30; exec @ARGV' codesign --force --sign "$IDENTITY" "$STAGE" 2>/dev/null; then
