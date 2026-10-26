@@ -108,17 +108,21 @@ grabbing ✦ tokens.
 - It is cheap to run. The mod redraws only when something happens, such as an obstacle reaching Clawd
   or a point scored, and CSS animation moves the scene in between. Paused or hidden, it costs nothing.
 
-The mod is in [`mods/bug-dash`](mods/bug-dash). To load it in every Claude Code session, the desktop app
-included, name the folder in the `env` block of `~/.claude/settings.json`:
+### Install Bug Dash
+At the prompt of a Claude Code terminal session:
 
-```json
-{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/padcoder/mods/bug-dash" } }
+```
+/plugin install bug-dash --marketplace mohammednuruddin/padcoder
 ```
 
-For a single terminal session, use `claude --plugin-dir mods/bug-dash` instead. Loaded globally, every open
-session runs its own copy, so L1 + Touchpad starts the game in each of them; keep one Claude window open
-while you play. The game draws in the
-desktop app; a terminal has no SVG, so there the band is left as it was.
+Answer `y` to add the marketplace, then press Enter to install for your user. From a shell, use
+`claude plugin install bug-dash --marketplace mohammednuruddin/padcoder`. In the desktop app, click **+**
+next to the prompt box, then **Plugins**, add the marketplace `mohammednuruddin/padcoder`, and add
+**bug-dash**. Once installed, it loads in every session, the desktop app included.
+
+The game draws in the desktop app; a terminal has no SVG, so there the band is left as it was. Every
+open session runs its own copy, so L1 + Touchpad starts the game in each of them: keep one Claude window
+open while you play. The mod's source is in [`mods/bug-dash`](mods/bug-dash).
 
 ## Power use
 PadCoder is built to cost nothing while you aren't using it:
@@ -185,6 +189,7 @@ Actions:
   Run `open /Applications/PadCoder.app` afterwards.
 - `PadCoder.app/Contents/MacOS/PadCoder --snapshot <dir>` renders the window and HUDs to PNGs, for checking layout.
 - `claude plugin test mods/bug-dash` runs the mod's tests, including a bot that plays two minutes of the course.
+  `claude --plugin-dir mods/bug-dash` runs the mod from your checkout, reloading as you edit it.
 
 | File | What's in it |
 |---|---|

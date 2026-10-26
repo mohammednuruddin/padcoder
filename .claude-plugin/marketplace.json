@@ -1,0 +1,14 @@
+{
+  "name": "padcoder",
+  "owner": {
+    "name": "mohammednuruddin"
+  },
+  "description": "Claude Code mods that go with PadCoder, the game-controller app for Claude.",
+  "plugins": [
+    {
+      "name": "bug-dash",
+      "source": "./mods/bug-dash",
+      "description": "An endless runner above the prompt to play while Claude works, with the mouse, keys or a PS5/PS4 pad through PadCoder."
+    }
+  ]
+}
