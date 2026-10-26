@@ -66,10 +66,17 @@ While the window is in front, the controller only lights things up there. It won
 | Combo | Does |
 |---|---|
 | L1 + ✕ / ○ / □ / △ | Quick prompts, such as "yes, go ahead" and "run it and fix any errors" |
+| **L1 + L2** | **Model menu** (⌘⇧I) |
+| **L1 + R2** | **Reasoning effort menu** (⌘⇧E) |
+| L1 + Create / Share | Permission mode menu (⌘⇧M) |
 | L1 + Options | Cmd+N |
 | L1 + R1 | Shift+Tab |
 | L1 + D-pad | Page Up / Page Down / Home / End |
 | **L1 + right stick** | **Prompt wheel**: point at one of 8 prompts and release L1 to send. Center the stick first to cancel. |
+
+To switch model or effort, open the menu with L1 + L2 or L1 + R2, release L1, pick with the D-pad,
+and press ✕. ○ closes the menu. These are the Claude desktop app's own shortcuts. The shortcut editor
+lists them under **✦ Claude**, so you can put them on any button.
 
 ## Light bar = what Claude is doing
 | Color | Meaning |

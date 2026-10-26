@@ -432,9 +432,23 @@ struct ActionEditor: View {
                 HStack(spacing: 8) {
                     Text(describeAction(value))
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
                         .padding(.horizontal, 10).padding(.vertical, 5)
                         .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.07)))
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.12)))
+                    Spacer(minLength: 0)
+                    Menu {
+                        ForEach(claudeShortcuts, id: \.combo) { shortcut in
+                            Button(describeAction(shortcut.combo)) { value = shortcut.combo }
+                        }
+                    } label: {
+                        Label("Claude", systemImage: "sparkle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Pick one of the Claude app's shortcuts")
+                }
+                HStack(spacing: 8) {
                     TextField("cmd+d", text: payload).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
                     Button(monitor == nil ? "Record" : "Press keys…") { toggleRecording() }
                         .buttonStyle(.borderedProminent)

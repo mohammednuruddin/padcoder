@@ -203,9 +203,27 @@ func describeAction(_ action: String) -> String {
     let parts = action.lowercased().split(separator: "+").map { String($0) }
     let mods = parts.dropLast().map { glyphs[$0] ?? $0 }.joined()
     let key = parts.last.map { glyphs[$0] ?? $0.uppercased() } ?? ""
+    if let name = claudeShortcutName(action) { return "\(mods + key)  \(name)" }
     let names: [String: String] = ["↩": "Return", "⎋": "Esc", "⌫": "Backspace", "⇥": "Tab"]
     if mods.isEmpty, let word = names[key] { return "\(key)  \(word)" }
     return mods + key
+}
+
+/// Shortcuts of the Claude desktop app's Code tab, offered in the shortcut editor.
+let claudeShortcuts: [(combo: String, name: String)] = [
+    ("cmd+shift+i", "Model menu"),
+    ("cmd+shift+e", "Effort menu"),
+    ("cmd+shift+m", "Permission mode menu"),
+    ("cmd+d", "Claude dictation"),
+    ("cmd+return", "Accept / submit"),
+    ("escape", "Stop Claude"),
+]
+
+func claudeShortcutName(_ action: String) -> String? {
+    guard let combo = parseCombo(action) else { return nil }
+    return claudeShortcuts.first { entry in
+        parseCombo(entry.combo).map { $0.code == combo.code && $0.flags == combo.flags } ?? false
+    }?.name
 }
 
 func buttonGlyph(_ name: String) -> String {
