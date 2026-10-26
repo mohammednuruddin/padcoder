@@ -3,3 +3,6 @@ PadCoder.app/
 
 # macOS
 .DS_Store
+
+# Types the Claude Code engine writes into a loaded mod
+mods/*/.claude-plugin/types/

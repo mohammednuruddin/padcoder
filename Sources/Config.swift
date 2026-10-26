@@ -10,7 +10,7 @@ let activeFlagURL = supportDir.appendingPathComponent("active")
 
 /// Actions: a key combo ("return", "cmd+d", "ctrl+shift+tab"), "send:<text>" (type + Return),
 /// "type:<text>", "leftClick", "rightClick", "gyro" (hold to aim), "dictation" (macOS), "pause",
-/// "game" (open / close Bug Dash), "none".
+/// "game" (Bug Dash game mode: shows the mod above the prompt and plays it with the pad), "none".
 /// Wheel slots run clockwise from the top: up, up-right, right, down-right, down, down-left, left, up-left.
 /// leftStick / rightStick: what moving the stick does, "mouse", "scroll" or "off".
 let defaultConfigJSON = """

@@ -44,10 +44,10 @@ final class PadCoder {
     private(set) var paused = false
     var onPauseChange: ((Bool) -> Void)?
 
-    /// Bug Dash; while its window is in front the pad plays the game instead of typing.
-    weak var game: GameWindowController?
-    private var gameFocused: Bool { game?.isFocused ?? false }
-    private var gameHeld: Set<String> = []
+    /// Bug Dash is a Claude mod above the prompt: in game mode the pad's buttons become
+    /// notifications it listens for, so nothing is typed into Claude.
+    private(set) var gameMode = false
+    private var gameFocused: Bool { gameMode }
 
     /// While the PadCoder window is in front, the pad only lights up the drawing.
     private var previewing: Bool { model.windowVisible && NSApp.isActive && !gameFocused }
@@ -81,6 +81,7 @@ final class PadCoder {
             ("com.padcoder.buzz", { $0.setState(.done); $0.rumbleAll(pulses: 1) }),
             ("com.padcoder.attention", { $0.setState(.needsYou); $0.rumbleAll(pulses: 3) }),
             ("com.padcoder.request", { $0.loadPendingRequest() }),
+            ("com.padcoder.game.thud", { $0.rumbleAll(pulses: 2) }),   // Bug Dash: Clawd was caught
         ]
         for (name, handler) in signals {
             var token: Int32 = 0
@@ -241,16 +242,13 @@ final class PadCoder {
                 ps.layerUsed = true
                 if overlay.mode.name == "wheel" { overlay.show(.hidden) }
             }
-            if gameFocused && action != "game" {
-                gameHeld.insert(slot)
-                game?.press(name, true)
+            if gameMode && action != "game" {
+                if let move = gameAction(name) { notify_post("com.padcoder.game.\(move)") }
                 return
             }
             if paused && action != "pause" && action != "game" { return }
             held[slot] = action
             perform(action, down: true, slot: slot, ps: ps)
-        } else if gameHeld.remove(slot) != nil {
-            game?.press(name, false)
         } else if let action = held.removeValue(forKey: slot) {
             perform(action, down: false, slot: slot, ps: ps)   // releases always pass, so nothing sticks
         }
@@ -264,7 +262,7 @@ final class PadCoder {
         case "gyro": setGyro(down, ps)
         case "dictation": if down { toggleDictation() }
         case "pause": if down { togglePause() }
-        case "game": if down { game?.toggle() }
+        case "game": if down { toggleGameMode() }
         default:
             if action.hasPrefix("send:") || action.hasPrefix("type:") {
                 if down { typeText(String(action.dropFirst(5)), thenReturn: action.hasPrefix("send:")) }
@@ -626,34 +624,38 @@ final class PadCoder {
         model.claudeState = s
         updateTriggers()
         refreshLight()
-        if s == .done || s == .needsYou { game?.claudeNeedsAttention(finished: s == .done) }
+        // The mod pauses the run itself; the pad goes back to driving Claude.
+        if s == .done || s == .needsYou { setGameMode(false) }
     }
 
-    /// Short rumbles for Bug Dash moments.
-    func gameHaptic(_ event: RunnerEvent) {
-        let (intensity, sharpness, duration, count): (Float, Float, Double, Int)
-        switch event {
-        case .start: (intensity, sharpness, duration, count) = (0.5, 0.4, 0.08, 1)
-        case .jump: (intensity, sharpness, duration, count) = (0.35, 0.8, 0.04, 1)
-        case .token: (intensity, sharpness, duration, count) = (0.25, 1.0, 0.025, 1)
-        case .dash: (intensity, sharpness, duration, count) = (0.75, 0.3, 0.16, 1)
-        case .smash: (intensity, sharpness, duration, count) = (0.9, 0.9, 0.06, 1)
-        case .hit: (intensity, sharpness, duration, count) = (1.0, 0.2, 0.22, 2)
+    // MARK: Bug Dash game mode
+
+    /// What each button does in Bug Dash; the mod listens for com.padcoder.game.<move>.
+    private func gameAction(_ name: String) -> String? {
+        switch name {
+        case "cross", "up", "touchpad": return "jump"   // also starts and resumes a run
+        case "circle", "down": return "slide"
+        case "r2", "r1", "square", "right": return "dash"
+        case "options": return "pause"
+        default: return nil
         }
-        for engine in pads.values.compactMap(\.engine) {
-            do {
-                try engine.start()
-                let events = (0..<count).map { i in
-                    CHHapticEvent(eventType: .hapticContinuous,
-                                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
-                                               CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)],
-                                  relativeTime: Double(i) * (duration + 0.08), duration: duration)
-                }
-                try engine.makePlayer(with: CHHapticPattern(events: events, parameters: [])).start(atTime: CHHapticTimeImmediate)
-            } catch {
-                log("rumble failed: \(error)")
-            }
+    }
+
+    func toggleGameMode() { setGameMode(!gameMode) }
+
+    /// On: the Bug Dash mod shows above Claude's prompt and resumes a paused run, and the pad
+    /// becomes its controller. Off: the run pauses and the pad drives Claude again.
+    private func setGameMode(_ on: Bool) {
+        guard on != gameMode else { return }
+        if on { pads.values.forEach(releaseInputs) }
+        gameMode = on
+        if on {
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.anthropic.claudefordesktop").first?
+                .activate(options: [])
         }
+        notify_post(on ? "com.padcoder.game.on" : "com.padcoder.game.off")
+        log(on ? "game mode on" : "game mode off")
+        rumbleAll(pulses: 1)
     }
 
     private func lightColor(_ now: Double) -> (Float, Float, Float) {

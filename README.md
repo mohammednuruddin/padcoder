@@ -91,22 +91,39 @@ lists them under **✦ Claude**, so you can put them on any button.
 ## Bug Dash: play while Claude works
 ![Bug Dash](docs/bugdash.png)
 
-An endless runner built into PadCoder. Open it with **L1 + Touchpad**, the **Bug Dash** button in the
-PadCoder window, or 🎮 → Play Bug Dash.
+An endless runner that lives in Claude Code itself: a mod drawn in the band above the prompt, where
+pets live. Clawd runs through a city of code at dusk, jumping bugs, sliding under failing tests and
+grabbing ✦ tokens.
 
-- **✕** jump (press twice to double-jump) · **○** slide under failing tests · **R2** dash through anything
-  (uses half the dash bar) · **Options** pause. The keyboard works too: space, ↓, →, Esc.
-- Tokens add 25 points and refill your dash. Bugs you smash while dashing add 50.
-- The corner shows what Claude is doing. When Claude **finishes** or **needs your approval**, the run
-  pauses, a banner tells you why, and the controller goes straight back to Claude.
-- The pad rumbles on jumps, tokens, dashes and crashes.
+- **L1 + Touchpad** shows it and turns the pad into its controller. Press it again to drive Claude.
+  `/bugdash` shows or hides it too.
+- **✕** or the touchpad jumps (press again in the air to double-jump) · **○** slides under a FAIL banner
+  (in the air it dives) · **□ / R1 / R2** dash through anything, using one of three charges ·
+  **Options** pauses. No pad? Click **Play** on the band, then use w, s, d and p.
+- A token is 25 points, clearing a bug or a banner 10, and smashing a bug mid-dash 15. Your best is kept.
+- When Claude **finishes** or **needs your approval**, the run pauses and says why, and the pad goes
+  straight back to Claude. The pad rumbles when Clawd is caught.
+- In game mode the pad sends notifications (`com.padcoder.game.jump` and so on), not keystrokes, so
+  nothing is typed into Claude by accident.
+- It is cheap to run. The mod redraws only when something happens, such as an obstacle reaching Clawd
+  or a point scored, and CSS animation moves the scene in between. Paused or hidden, it costs nothing.
+
+The mod is in [`mods/bug-dash`](mods/bug-dash). To load it in every Claude Code session, the desktop app
+included, name the folder in the `env` block of `~/.claude/settings.json`:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/padcoder/mods/bug-dash" } }
+```
+
+For a single terminal session, use `claude --plugin-dir mods/bug-dash` instead. The game draws in the
+desktop app; a terminal has no SVG, so there the band is left as it was.
 
 ## Power use
 PadCoder is built to cost nothing while you aren't using it:
 - The input loop runs only while a stick is pushed, a key repeats, gyro aims or the wheel is open.
 - Config and approval files are watched, not polled.
 - The light bar is set once per state change. Only "needs you" pulses.
-- The settings window redraws only when an input changes. Bug Dash renders only while you're playing.
+- The settings window redraws only when an input changes.
 - The rumble motors' engine powers down between rumbles.
 
 With the window closed and no controller input, `top` measures 0% CPU and 0 wake-ups a second
@@ -165,6 +182,7 @@ Actions:
 - `./build.sh install` also replaces `/Applications/PadCoder.app` and the hook script, and quits the running copy.
   Run `open /Applications/PadCoder.app` afterwards.
 - `PadCoder.app/Contents/MacOS/PadCoder --snapshot <dir>` renders the window and HUDs to PNGs, for checking layout.
+- `claude plugin test mods/bug-dash` runs the mod's tests, including a bot that plays two minutes of the course.
 
 | File | What's in it |
 |---|---|
@@ -175,6 +193,8 @@ Actions:
 | `Sources/SettingsView.swift` | The PadCoder window |
 | `Sources/Overlay.swift` | Prompt wheel and approval HUD |
 | `hooks/permission-hook.sh` | The Claude Code `PermissionRequest` hook |
+| `mods/bug-dash/hooks/scene.ts` | Bug Dash's rules and its SVG scene |
+| `mods/bug-dash/hooks/register.tsx` | The mod's hooks: the band, `/bugdash`, the pad's signals |
 
 ## Troubleshooting
 The log is at `~/Library/Logs/PadCoder.log` (🎮 → Open Log). It records button presses,

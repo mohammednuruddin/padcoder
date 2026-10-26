@@ -367,7 +367,7 @@ struct ActionEditor: View {
             case .gyro: return "Hold the button and tilt the controller to aim the mouse."
             case .dictation: return "Toggles macOS dictation. Claude's own dictation is the shortcut cmd+d."
             case .pause: return "Pauses PadCoder so you can game. Press it again to resume."
-            case .game: return "Opens Bug Dash, the runner you can play while Claude works. Press it again to go back to Claude."
+            case .game: return "Shows the Bug Dash mod above Claude's prompt and turns the pad into its controller. Press it again to drive Claude."
             case .none: return "Does nothing."
             }
         }
@@ -795,4 +795,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         DispatchQueue.main.async { dropDockIconIfNoWindows() }
         log("settings window closed")
     }
+}
+
+/// PadCoder is a menu bar app: it only shows in the Dock while one of its windows is open.
+func dropDockIconIfNoWindows() {
+    let open = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) }
+    if !open { NSApp.setActivationPolicy(.accessory) }
 }

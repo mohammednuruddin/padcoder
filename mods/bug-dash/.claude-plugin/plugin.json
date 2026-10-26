@@ -1,0 +1,1 @@
+{ "name": "bug-dash", "version": "0.2.0", "description": "An endless runner in the band above the prompt to play while Claude works; pauses when Claude finishes or needs you.", "types": "./types/index.d.ts" }

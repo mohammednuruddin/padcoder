@@ -8,7 +8,6 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let pad = PadCoder()
     lazy var settings = SettingsWindowController(model: pad.model, store: ConfigStore(config: pad.config))
-    let game = GameWindowController()
     var status: NSStatusItem!
     var pauseItem: NSMenuItem!
     var loginItem: NSMenuItem!
@@ -41,19 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.pauseItem.title = paused ? "Resume (Create button)" : "Pause (Create button)"
             self?.status.button?.title = paused ? "⏸︎🎮" : "🎮"
         }
-        pad.game = game
-        game.onEvent = { [weak self] in self?.pad.gameHaptic($0) }
-        game.claudeStatus = { [weak self] in
-            guard let model = self?.pad.model else { return ("", .gray) }
-            if model.paused { return ("PadCoder paused", .gray) }
-            switch model.claudeState {
-            case .idle: return ("Claude idle", claudeOrange)
-            case .working: return ("Claude is working…", NSColor(srgbRed: 0.3, green: 0.5, blue: 1, alpha: 1))
-            case .needsYou: return ("Claude needs you", NSColor(srgbRed: 0.95, green: 0.3, blue: 0.3, alpha: 1))
-            case .done: return ("Claude finished", NSColor(srgbRed: 0.3, green: 0.85, blue: 0.5, alpha: 1))
-            }
-        }
-        pad.model.onPlayGame = { [weak self] in self?.game.show() }
+        pad.model.onPlayGame = { [weak self] in self?.pad.toggleGameMode() }
         pad.start()
         setUpLoginItem()
         if !UserDefaults.standard.bool(forKey: "settingsShownOnce") {
@@ -120,7 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() { settings.show() }
-    @objc func playGame() { game.show() }
+    @objc func playGame() { pad.toggleGameMode() }
     @objc func togglePause() { pad.togglePause() }
     @objc func editConfig() { NSWorkspace.shared.open(configURL) }
     @objc func openLog() { NSWorkspace.shared.open(logURL) }
