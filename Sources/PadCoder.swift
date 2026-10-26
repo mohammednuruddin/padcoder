@@ -185,8 +185,8 @@ final class PadCoder {
             self.liveChanged()
         }
         // Sticks and triggers report changes; the input loop only runs while they need it.
-        pad.leftThumbstick.valueChangedHandler = { [weak self] _, _, _ in self?.inputChanged() }
-        pad.rightThumbstick.valueChangedHandler = { [weak self] _, _, _ in self?.inputChanged() }
+        pad.leftThumbstick.valueChangedHandler = { [weak self] _, x, y in self?.stickMoved(x, y) }
+        pad.rightThumbstick.valueChangedHandler = { [weak self] _, x, y in self?.stickMoved(x, y) }
         pad.leftTrigger.valueChangedHandler = { [weak self] _, _, _ in self?.liveChanged() }
         pad.rightTrigger.valueChangedHandler = { [weak self] _, _, _ in self?.liveChanged() }
 
@@ -374,6 +374,12 @@ final class PadCoder {
                 || (leftOn && hypot(ps.pad.leftThumbstick.xAxis.value, ps.pad.leftThumbstick.yAxis.value) > deadzone)
                 || (rightOn && hypot(ps.pad.rightThumbstick.xAxis.value, ps.pad.rightThumbstick.yAxis.value) > deadzone)
         }
+    }
+
+    /// Resting jitter near the centre is ignored while nothing is listening, so it can't wake PadCoder.
+    private func stickMoved(_ x: Float, _ y: Float) {
+        guard loopTimer != nil || model.windowVisible || hypot(x, y) > 0.02 else { return }
+        inputChanged()
     }
 
     /// Sticks and triggers moved: wake the loop if it's needed, and refresh the window's drawing.

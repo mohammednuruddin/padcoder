@@ -109,7 +109,8 @@ PadCoder is built to cost nothing while you aren't using it:
 - The settings window redraws only when an input changes. Bug Dash renders only while you're playing.
 - The rumble motors' engine powers down between rumbles.
 
-Idle, it measures 0% CPU and 0 wake-ups a second in `top`.
+With the window closed and no controller input, `top` measures 0% CPU and 0 wake-ups a second
+(it was about 350 a second before this work). With the window open and idle, it's under 1 a second.
 
 ## Connect it to Claude Code
 The status light, buzzes and pad approvals come from Claude Code
