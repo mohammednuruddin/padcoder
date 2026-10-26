@@ -59,6 +59,8 @@ final class LiveModel: ObservableObject {
     var onTestRumble: (() -> Void)?
     var onTestLight: (() -> Void)?
     var onTriggerTest: ((String, Bool) -> Void)?
+    var onPlayGame: (() -> Void)?
+    var onWindowShown: (() -> Void)?
 
     var shown: PadInfo? { pads.first { $0.id == shownPad } ?? pads.first }
     var shownKind: PadKind { shown?.kind ?? .ps5 }
@@ -190,6 +192,7 @@ func describeAction(_ action: String) -> String {
     case "gyro": return "Gyro aim"
     case "dictation": return "macOS dictation"
     case "pause": return "Pause PadCoder"
+    case "game": return "Play Bug Dash"
     default: break
     }
     if action.hasPrefix("send:") { return "Sends “\(action.dropFirst(5))”" }

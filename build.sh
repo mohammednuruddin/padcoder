@@ -12,7 +12,7 @@ mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 cp Info.plist "$STAGE/Contents/Info.plist"
 
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
-  -framework AppKit -framework GameController -framework CoreHaptics -framework ServiceManagement \
+  -framework AppKit -framework GameController -framework CoreHaptics -framework ServiceManagement -framework SpriteKit \
   -o "$STAGE/Contents/MacOS/PadCoder" Sources/*.swift
 
 # The icon is drawn in code (Sources/AppIcon.swift); render it and pack it as an .icns.

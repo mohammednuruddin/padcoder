@@ -119,6 +119,8 @@ struct TopBar: View {
                 Circle().fill(status.1).frame(width: 9, height: 9).shadow(color: status.1, radius: 4)
                 Text(status.0)
             }
+            Button { model.onPlayGame?() } label: { Label("Bug Dash", systemImage: "flag.checkered") }
+                .help("Play while Claude works (L1 + touchpad)")
             Toggle("Pause", isOn: Binding(get: { model.paused }, set: { _ in model.onTogglePause?() }))
                 .toggleStyle(.switch)
                 .controlSize(.small)
@@ -323,7 +325,7 @@ struct ActionEditor: View {
     @State private var editingKey = false
 
     enum Kind: String, CaseIterable, Identifiable {
-        case inherit, key, send, type, leftClick, rightClick, gyro, dictation, pause, none
+        case inherit, key, send, type, leftClick, rightClick, gyro, dictation, pause, game, none
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -336,6 +338,7 @@ struct ActionEditor: View {
             case .gyro: return "Gyro aim (hold)"
             case .dictation: return "macOS dictation"
             case .pause: return "Pause PadCoder"
+            case .game: return "Play Bug Dash"
             case .none: return "Nothing"
             }
         }
@@ -349,6 +352,7 @@ struct ActionEditor: View {
             case .gyro: return "gyroscope"
             case .dictation: return "mic"
             case .pause: return "pause.circle"
+            case .game: return "flag.checkered"
             case .none: return "nosign"
             }
         }
@@ -363,6 +367,7 @@ struct ActionEditor: View {
             case .gyro: return "Hold the button and tilt the controller to aim the mouse."
             case .dictation: return "Toggles macOS dictation. Claude's own dictation is the shortcut cmd+d."
             case .pause: return "Pauses PadCoder so you can game. Press it again to resume."
+            case .game: return "Opens Bug Dash, the runner you can play while Claude works. Press it again to go back to Claude."
             case .none: return "Does nothing."
             }
         }
@@ -378,6 +383,7 @@ struct ActionEditor: View {
         case "gyro": return .gyro
         case "dictation": return .dictation
         case "pause": return .pause
+        case "game": return .game
         default:
             if value.hasPrefix("send:") { return .send }
             if value.hasPrefix("type:") { return .type }
@@ -775,6 +781,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
         store.refresh()
         model.windowVisible = true
+        model.onWindowShown?()
         NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -785,7 +792,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         for name in model.triggerTests { model.onTriggerTest?(name, false) }
         model.triggerTests = []
         model.windowVisible = false
-        NSApp.setActivationPolicy(.accessory)
+        DispatchQueue.main.async { dropDockIconIfNoWindows() }
         log("settings window closed")
     }
 }

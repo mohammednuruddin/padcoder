@@ -70,6 +70,7 @@ While the window is in front, the controller only lights things up there. It won
 | **L1 + R2** | **Reasoning effort menu** (⌘⇧E) |
 | L1 + Create / Share | Permission mode menu (⌘⇧M) |
 | L1 + Options | Cmd+N |
+| **L1 + Touchpad** | **Play Bug Dash** (press again to go back to Claude) |
 | L1 + R1 | Shift+Tab |
 | L1 + D-pad | Page Up / Page Down / Home / End |
 | **L1 + right stick** | **Prompt wheel**: point at one of 8 prompts and release L1 to send. Center the stick first to cancel. |
@@ -86,6 +87,29 @@ lists them under **✦ Claude**, so you can put them on any button.
 | Green flash + 1 buzz | Finished a reply |
 | Pulsing red + 3 buzzes | Needs your approval. R2 also gets a "click" resistance (DualSense only) |
 | Dim | PadCoder is paused |
+
+## Bug Dash: play while Claude works
+![Bug Dash](docs/bugdash.png)
+
+An endless runner built into PadCoder. Open it with **L1 + Touchpad**, the **Bug Dash** button in the
+PadCoder window, or 🎮 → Play Bug Dash.
+
+- **✕** jump (press twice to double-jump) · **○** slide under failing tests · **R2** dash through anything
+  (uses half the dash bar) · **Options** pause. The keyboard works too: space, ↓, →, Esc.
+- Tokens add 25 points and refill your dash. Bugs you smash while dashing add 50.
+- The corner shows what Claude is doing. When Claude **finishes** or **needs your approval**, the run
+  pauses, a banner tells you why, and the controller goes straight back to Claude.
+- The pad rumbles on jumps, tokens, dashes and crashes.
+
+## Power use
+PadCoder is built to cost nothing while you aren't using it:
+- The input loop runs only while a stick is pushed, a key repeats, gyro aims or the wheel is open.
+- Config and approval files are watched, not polled.
+- The light bar is set once per state change. Only "needs you" pulses.
+- The settings window redraws only when an input changes. Bug Dash renders only while you're playing.
+- The rumble motors' engine powers down between rumbles.
+
+Idle, it measures 0% CPU and 0 wake-ups a second in `top`.
 
 ## Connect it to Claude Code
 The status light, buzzes and pad approvals come from Claude Code

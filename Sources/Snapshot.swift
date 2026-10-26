@@ -2,6 +2,7 @@
 
 import AppKit
 import SwiftUI
+import SpriteKit
 
 @MainActor
 func renderSnapshots(to dir: URL) {
@@ -57,7 +58,34 @@ func renderSnapshots(to dir: URL) {
     let wheel = OverlayView(frame: NSRect(x: 0, y: 0, width: 460, height: 460))
     wheel.mode = .wheel(items: Config().wheel, selected: 2)
     save(wheel, dir.appendingPathComponent("hud-wheel.png"))
+    // Bug Dash: the start card, then a couple of seconds of simulated play.
+    let scene = RunnerScene(size: CGSize(width: 1000, height: 560))
+    scene.claudeStatus = { ("Claude is working…", NSColor(srgbRed: 0.3, green: 0.5, blue: 1, alpha: 1)) }
+    scene.recordsBest = false
+    let skView = SKView(frame: NSRect(x: 0, y: 0, width: 1000, height: 560))
+    let gameWindow = NSWindow(contentRect: skView.frame, styleMask: [.titled], backing: .buffered, defer: false)
+    gameWindow.contentView = skView
+    skView.presentScene(scene)
+    scene.update(0)
+    saveScene(skView, scene, dir.appendingPathComponent("game-start.png"))
+    scene.press("cross", true)
+    scene.press("cross", false)
+    for frame in 1...150 {
+        if frame == 138 { scene.press("cross", true) }
+        scene.update(Double(frame) / 60)
+    }
+    saveScene(skView, scene, dir.appendingPathComponent("game-play.png"))
+    scene.showClaudeBanner("Claude finished ✓", "Back to work. Your run is paused.", tint: NSColor(srgbRed: 0.3, green: 0.85, blue: 0.5, alpha: 1))
+    saveScene(skView, scene, dir.appendingPathComponent("game-banner.png"))
+    scene.press("cross", true)                    // resume, then run into the next bug
+    for frame in 151...900 { scene.update(Double(frame) / 60) }
+    saveScene(skView, scene, dir.appendingPathComponent("game-over.png"))
     print("snapshots written to \(dir.path)")
+}
+
+private func saveScene(_ view: SKView, _ scene: SKScene, _ url: URL) {
+    guard let image = view.texture(from: scene)?.cgImage() else { return }
+    try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: url)
 }
 
 private func save(_ view: NSView, _ url: URL) {

@@ -44,19 +44,21 @@ final class PadCoder {
     private(set) var paused = false
     var onPauseChange: ((Bool) -> Void)?
 
+    /// Bug Dash; while its window is in front the pad plays the game instead of typing.
+    weak var game: GameWindowController?
+    private var gameFocused: Bool { game?.isFocused ?? false }
+    private var gameHeld: Set<String> = []
+
     /// While the PadCoder window is in front, the pad only lights up the drawing.
-    private var previewing: Bool { model.windowVisible && NSApp.isActive }
-    private var lastUIAt = 0.0
+    private var previewing: Bool { model.windowVisible && NSApp.isActive && !gameFocused }
     private var lastBatteryAt = 0.0
 
     private var pads: [ObjectIdentifier: PadState] = [:]
     private var held: [String: String] = [:]                     // "<pad>-<button>" -> action being held
     private var repeaters: [String: (combo: KeyCombo, next: Double)] = [:]
     private var state: ClaudeState = .idle
-    private var doneUntil = 0.0
     private var pending: Pending?
     private var lastTick = CACurrentMediaTime()
-    private var lastLightAt = 0.0
     private var lastLight: (Float, Float, Float) = (-1, -1, -1)
     private var notifyTokens: [Int32] = []
 
@@ -71,8 +73,7 @@ final class PadCoder {
             if let c = n.object as? GCController { self?.detach(c) }
         }
         GCController.controllers().forEach(attach)
-        Timer.scheduledTimer(withTimeInterval: 1.0 / 120, repeats: true) { [weak self] _ in self?.tick() }
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.slowTick() }
+        watchFiles()
 
         // Signals from Claude Code hooks (see README) or `notifyutil -p <name>`.
         let signals: [(String, (PadCoder) -> Void)] = [
@@ -92,13 +93,21 @@ final class PadCoder {
         }
         model.onTogglePause = { [weak self] in self?.togglePause() }
         model.onTestRumble = { [weak self] in self?.rumbleAll(pulses: 2) }
-        model.onTestLight = { [weak self] in self?.lightTestUntil = CACurrentMediaTime() + 2.5 }
+        model.onTestLight = { [weak self] in
+            self?.lightTestUntil = CACurrentMediaTime() + 2.5
+            self?.refreshLight()
+        }
         model.onTriggerTest = { [weak self] name, on in self?.triggerTest(name, on) }
+        model.onWindowShown = { [weak self] in
+            self?.refreshLight()
+            self?.liveChanged()
+        }
         config.onReload { [weak self] in
-            self?.lastLight = (-1, -1, -1)
+            self?.refreshLight()
             self?.refreshActiveFlag()
         }
         refreshActiveFlag()
+        refreshLight()
     }
 
     private var lightTestUntil = 0.0
@@ -168,15 +177,23 @@ final class PadCoder {
         ps.primary?.valueChangedHandler = { [weak self, weak ps] _, x, y in
             guard let self, let ps else { return }
             self.primaryTouch(x, y, ps)
+            self.liveChanged()
         }
         ps.secondary?.valueChangedHandler = { [weak self, weak ps] _, x, y in
             guard let self, let ps else { return }
             self.secondaryTouch(x, y, ps)
+            self.liveChanged()
         }
+        // Sticks and triggers report changes; the input loop only runs while they need it.
+        pad.leftThumbstick.valueChangedHandler = { [weak self] _, _, _ in self?.inputChanged() }
+        pad.rightThumbstick.valueChangedHandler = { [weak self] _, _, _ in self?.inputChanged() }
+        pad.leftTrigger.valueChangedHandler = { [weak self] _, _, _ in self?.liveChanged() }
+        pad.rightTrigger.valueChangedHandler = { [weak self] _, _, _ in self?.liveChanged() }
 
         ps.engine = c.haptics?.createEngine(withLocality: .default)
+        ps.engine?.isAutoShutdownEnabled = true   // the motors' engine powers down between rumbles
         if let e = ps.engine { rumble(e, pulses: 1) }
-        lastLight = (-1, -1, -1)
+        refreshLight()
         updateTriggers()
         refreshActiveFlag()
     }
@@ -224,9 +241,16 @@ final class PadCoder {
                 ps.layerUsed = true
                 if overlay.mode.name == "wheel" { overlay.show(.hidden) }
             }
-            if paused && action != "pause" { return }
+            if gameFocused && action != "game" {
+                gameHeld.insert(slot)
+                game?.press(name, true)
+                return
+            }
+            if paused && action != "pause" && action != "game" { return }
             held[slot] = action
             perform(action, down: true, slot: slot, ps: ps)
+        } else if gameHeld.remove(slot) != nil {
+            game?.press(name, false)
         } else if let action = held.removeValue(forKey: slot) {
             perform(action, down: false, slot: slot, ps: ps)   // releases always pass, so nothing sticks
         }
@@ -240,6 +264,7 @@ final class PadCoder {
         case "gyro": setGyro(down, ps)
         case "dictation": if down { toggleDictation() }
         case "pause": if down { togglePause() }
+        case "game": if down { game?.toggle() }
         default:
             if action.hasPrefix("send:") || action.hasPrefix("type:") {
                 if down { typeText(String(action.dropFirst(5)), thenReturn: action.hasPrefix("send:")) }
@@ -253,6 +278,7 @@ final class PadCoder {
                 if down {
                     tapKey(combo)
                     repeaters[slot] = (combo, CACurrentMediaTime() + repeatDelay)
+                    wakeLoop()
                 } else {
                     repeaters[slot] = nil
                 }
@@ -275,7 +301,8 @@ final class PadCoder {
         showLive("l1", pressed, ps)
         if pressed {
             log("press l1")
-            ps.l1DownAt = previewing ? nil : CACurrentMediaTime()
+            ps.l1DownAt = previewing || gameFocused ? nil : CACurrentMediaTime()
+            if ps.l1DownAt != nil { wakeLoop() }   // the wheel follows the right stick
             ps.layerUsed = false
             ps.wheelSelection = nil
             return
@@ -320,14 +347,61 @@ final class PadCoder {
         return pow(n, 2.2) * (v < 0 ? -1 : 1)
     }
 
+    // MARK: Input loop
+    // The 120 Hz loop only runs while a stick is pushed, a key repeats, gyro aims or the wheel is up.
+    // Everything else is event-driven, so an idle PadCoder doesn't wake the CPU.
+
+    private var loopTimer: Timer?
+    private var loopIdleSince: Double?
+
+    private func wakeLoop() {
+        guard loopTimer == nil else { return }
+        lastTick = CACurrentMediaTime()
+        loopIdleSince = nil
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in self?.tick() }
+        timer.tolerance = 0.002
+        RunLoop.main.add(timer, forMode: .common)
+        loopTimer = timer
+    }
+
+    private var loopNeeded: Bool {
+        if !repeaters.isEmpty { return true }
+        let deadzone = Float(config.double("stickDeadzone", 0.12))
+        let leftOn = config.string("leftStick", "mouse") != "off"
+        let rightOn = config.string("rightStick", "scroll") != "off"
+        return pads.values.contains { ps in
+            ps.gyro || ps.l1DownAt != nil
+                || (leftOn && hypot(ps.pad.leftThumbstick.xAxis.value, ps.pad.leftThumbstick.yAxis.value) > deadzone)
+                || (rightOn && hypot(ps.pad.rightThumbstick.xAxis.value, ps.pad.rightThumbstick.yAxis.value) > deadzone)
+        }
+    }
+
+    /// Sticks and triggers moved: wake the loop if it's needed, and refresh the window's drawing.
+    private func inputChanged() {
+        if loopTimer == nil && loopNeeded { wakeLoop() }
+        liveChanged()
+    }
+
+    private func sleepLoopIfIdle(_ now: Double) {
+        if loopNeeded {
+            loopIdleSince = nil
+        } else if let since = loopIdleSince {
+            if now - since > 0.3 {
+                loopTimer?.invalidate()
+                loopTimer = nil
+                loopIdleSince = nil
+            }
+        } else {
+            loopIdleSince = now
+        }
+    }
+
     private func tick() {
         let now = CACurrentMediaTime()
         let dt = min(now - lastTick, 0.05)
         lastTick = now
-        if state == .done && now >= doneUntil { setState(.idle) }
-        updateLight(now)
-        if model.windowVisible && now - lastUIAt > 1.0 / 30 { lastUIAt = now; updateLiveModel(now) }
-        guard !paused, !previewing else { return }
+        defer { sleepLoopIfIdle(now) }
+        guard !paused, !previewing, !gameFocused else { return }
 
         let deadzone = Float(config.double("stickDeadzone", 0.12))
         let mouseSpeed = config.double("mouseSpeed", 1900)
@@ -363,14 +437,29 @@ final class PadCoder {
         }
     }
 
+    private var liveUpdateQueued = false
+
+    /// Coalesces drawing updates for the PadCoder window to at most 30 a second, and only while it's open.
+    func liveChanged() {
+        guard model.windowVisible, !liveUpdateQueued else { return }
+        liveUpdateQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30) { [weak self] in
+            guard let self else { return }
+            self.liveUpdateQueued = false
+            self.updateLiveModel(CACurrentMediaTime())
+        }
+    }
+
     private func updateLiveModel(_ now: Double) {
         guard let id = model.shown?.id, let ps = pads[id] else { return }
         let pad = ps.pad
-        func pt(_ d: GCControllerDirectionPad) -> CGPoint { CGPoint(x: CGFloat(d.xAxis.value), y: CGFloat(d.yAxis.value)) }
+        // Rounded, with resting jitter dropped, so a still stick doesn't keep redrawing the window.
+        func q(_ v: Float) -> CGFloat { abs(v) < 0.03 ? 0 : (CGFloat(v) * 100).rounded() / 100 }
+        func pt(_ d: GCControllerDirectionPad) -> CGPoint { CGPoint(x: q(d.xAxis.value), y: q(d.yAxis.value)) }
         let left = pt(pad.leftThumbstick), right = pt(pad.rightThumbstick)
         if left != model.leftStick { model.leftStick = left }
         if right != model.rightStick { model.rightStick = right }
-        let l2 = CGFloat(pad.leftTrigger.value), r2 = CGFloat(pad.rightTrigger.value)
+        let l2 = q(pad.leftTrigger.value), r2 = q(pad.rightTrigger.value)
         if l2 != model.l2 { model.l2 = l2 }
         if r2 != model.r2 { model.r2 = r2 }
         let touches = [ps.primary, ps.secondary].compactMap { $0 }.map(pt).filter { $0 != .zero }
@@ -386,8 +475,47 @@ final class PadCoder {
         }
     }
 
-    private func slowTick() {
+    // MARK: File watching (instead of polling)
+
+    private var watchers: [DispatchSourceFileSystemObject] = []
+    private var pendingTimer: Timer?
+
+    /// Reacts to config saves and approval requests as they land on disk, with a slow safety net
+    /// for edits a directory watch can miss (an editor writing a file in place).
+    private func watchFiles() {
+        for dir in [supportDir, requestsDir] {
+            let fd = open(dir.path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+            source.setEventHandler { [weak self] in self?.filesChanged() }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            watchers.append(source)
+        }
+        let net = Timer(timeInterval: 10, repeats: true) { [weak self] _ in self?.filesChanged() }
+        net.tolerance = 5
+        RunLoop.main.add(net, forMode: .common)
+    }
+
+    private func filesChanged() {
         config.reload()   // reload handlers refresh the light and the approvals flag
+        checkPending()
+    }
+
+    /// The countdown on the approval panel needs a tick only while a request is showing.
+    private func setPendingTimer(_ on: Bool) {
+        if on, pendingTimer == nil {
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.checkPending() }
+            timer.tolerance = 0.2
+            RunLoop.main.add(timer, forMode: .common)
+            pendingTimer = timer
+        } else if !on {
+            pendingTimer?.invalidate()
+            pendingTimer = nil
+        }
+    }
+
+    private func checkPending() {
         if let p = pending {
             let file = requestsDir.appendingPathComponent("\(p.id).json")
             if !FileManager.default.fileExists(atPath: file.path) || !requestIsLive(p) {
@@ -407,6 +535,7 @@ final class PadCoder {
     private func setGyro(_ on: Bool, _ ps: PadState) {
         ps.gyro = on
         if let m = ps.controller.motion, m.sensorsRequireManualActivation { m.sensorsActive = on }
+        if on { wakeLoop() }
         log("gyro \(on ? "on" : "off") (motion: \(ps.controller.motion != nil), rotation rate: \(ps.controller.motion?.hasRotationRate ?? false))")
     }
 
@@ -430,7 +559,7 @@ final class PadCoder {
 
     private func primaryTouch(_ x: Float, _ y: Float, _ ps: PadState) {
         let now = CACurrentMediaTime()
-        if paused || previewing || (x == 0 && y == 0) { ps.lastPrimary = nil; return }   // (0,0) = finger lifted
+        if paused || previewing || gameFocused || (x == 0 && y == 0) { ps.lastPrimary = nil; return }   // (0,0) = finger lifted
         defer { ps.lastPrimary = (x, y, now) }
         if ps.gestureStart != nil { ps.gestureLast = (x, y) }
         guard let l = ps.lastPrimary, now - l.t < 0.08 else { return }
@@ -454,7 +583,7 @@ final class PadCoder {
             ps.gestureLast = (p.x, p.y)
         } else if !touching, let s = ps.gestureStart {
             ps.gestureStart = nil
-            guard !paused, !previewing, let e = ps.gestureLast else { return }
+            guard !paused, !previewing, !gameFocused, let e = ps.gestureLast else { return }
             let dx = e.x - s.x, dy = e.y - s.y
             guard now - s.t < 0.5, abs(dx) > 0.6, abs(dx) > 2 * abs(dy) else { return }
             let key = dx < 0 ? "swipeLeft" : "swipeRight"
@@ -473,13 +602,52 @@ final class PadCoder {
         if pending == nil { setState(.working) }
     }
 
+    private var doneWork: DispatchWorkItem?
+
     private func setState(_ s: ClaudeState) {
-        if s == .done { doneUntil = CACurrentMediaTime() + 2.5 }
+        if s == .done {
+            // The green "finished" light fades back to idle after a moment.
+            doneWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                if self?.state == .done { self?.setState(.idle) }
+            }
+            doneWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
+        }
         guard s != state else { return }
         log("state \(state) -> \(s)")
         state = s
         model.claudeState = s
         updateTriggers()
+        refreshLight()
+        if s == .done || s == .needsYou { game?.claudeNeedsAttention(finished: s == .done) }
+    }
+
+    /// Short rumbles for Bug Dash moments.
+    func gameHaptic(_ event: RunnerEvent) {
+        let (intensity, sharpness, duration, count): (Float, Float, Double, Int)
+        switch event {
+        case .start: (intensity, sharpness, duration, count) = (0.5, 0.4, 0.08, 1)
+        case .jump: (intensity, sharpness, duration, count) = (0.35, 0.8, 0.04, 1)
+        case .token: (intensity, sharpness, duration, count) = (0.25, 1.0, 0.025, 1)
+        case .dash: (intensity, sharpness, duration, count) = (0.75, 0.3, 0.16, 1)
+        case .smash: (intensity, sharpness, duration, count) = (0.9, 0.9, 0.06, 1)
+        case .hit: (intensity, sharpness, duration, count) = (1.0, 0.2, 0.22, 2)
+        }
+        for engine in pads.values.compactMap(\.engine) {
+            do {
+                try engine.start()
+                let events = (0..<count).map { i in
+                    CHHapticEvent(eventType: .hapticContinuous,
+                                  parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
+                                               CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)],
+                                  relativeTime: Double(i) * (duration + 0.08), duration: duration)
+                }
+                try engine.makePlayer(with: CHHapticPattern(events: events, parameters: [])).start(atTime: CHHapticTimeImmediate)
+            } catch {
+                log("rumble failed: \(error)")
+            }
+        }
     }
 
     private func lightColor(_ now: Double) -> (Float, Float, Float) {
@@ -492,18 +660,43 @@ final class PadCoder {
             Float(low + (1 - low) * (0.5 + 0.5 * sin(2 * .pi * now / period)))
         }
         switch state {
-        case .working: let k = pulse(1.6, 0.25); return (0.15 * k, 0.35 * k, 1.0 * k)
-        case .needsYou: let k = pulse(0.7, 0.2); return (1.0 * k, 0.08 * k, 0.05 * k)
+        case .working: return (0.15, 0.35, 1.0)   // steady: no Bluetooth chatter while Claude works
+        case .needsYou: let k = pulse(0.8, 0.2); return (1.0 * k, 0.08 * k, 0.05 * k)
         case .done: return (0.1, 0.9, 0.3)
         case .idle: return (0.85, 0.47, 0.34)
         }
     }
 
-    private func updateLight(_ now: Double) {
-        guard now - lastLightAt >= 0.066 else { return }
-        let c = lightColor(now)
-        guard abs(c.0 - lastLight.0) + abs(c.1 - lastLight.1) + abs(c.2 - lastLight.2) > 0.03 else { return }
-        lastLightAt = now
+    private var lightTimer: Timer?
+
+    /// Only "needs you" and the light test animate; every other state is one write to the pad.
+    private var lightAnimating: Bool {
+        CACurrentMediaTime() < lightTestUntil || (!paused && state == .needsYou)
+    }
+
+    private func refreshLight() {
+        applyLight(force: true)
+        if lightAnimating, lightTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 12, repeats: true) { [weak self] _ in self?.lightFrame() }
+            timer.tolerance = 0.02
+            RunLoop.main.add(timer, forMode: .common)
+            lightTimer = timer
+        }
+    }
+
+    private func lightFrame() {
+        if lightAnimating {
+            applyLight(force: false)
+        } else {
+            lightTimer?.invalidate()
+            lightTimer = nil
+            applyLight(force: true)
+        }
+    }
+
+    private func applyLight(force: Bool) {
+        let c = lightColor(CACurrentMediaTime())
+        guard force || abs(c.0 - lastLight.0) + abs(c.1 - lastLight.1) + abs(c.2 - lastLight.2) > 0.03 else { return }
         lastLight = c
         let color = GCColor(red: c.0, green: c.1, blue: c.2)
         for ps in pads.values { ps.controller.light?.color = color }
@@ -586,6 +779,7 @@ final class PadCoder {
             }
             if fm.fileExists(atPath: decisionFile.path) { continue }   // answered, hook is wrapping up
             pending = p
+            setPendingTimer(true)
             log("approval request \(id): \(tool)")
             setState(.needsYou)
             rumbleAll(pulses: 3)
@@ -617,6 +811,7 @@ final class PadCoder {
 
     private func clearPending() {
         pending = nil
+        setPendingTimer(false)
         if overlay.mode.name == "approval" { overlay.show(.hidden) }
         updateTriggers()
         loadPendingRequest()   // next queued request, if any
@@ -631,7 +826,7 @@ final class PadCoder {
         if paused, overlay.mode.name == "wheel" { overlay.show(.hidden) }
         log(paused ? "paused" : "resumed")
         model.paused = paused
-        lastLight = (-1, -1, -1)
+        refreshLight()
         updateTriggers()
         refreshActiveFlag()
         rumbleAll(pulses: paused ? 2 : 1)

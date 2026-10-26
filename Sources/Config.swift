@@ -9,7 +9,8 @@ let requestsDir = supportDir.appendingPathComponent("requests")
 let activeFlagURL = supportDir.appendingPathComponent("active")
 
 /// Actions: a key combo ("return", "cmd+d", "ctrl+shift+tab"), "send:<text>" (type + Return),
-/// "type:<text>", "leftClick", "rightClick", "gyro" (hold to aim), "dictation" (macOS), "pause", "none".
+/// "type:<text>", "leftClick", "rightClick", "gyro" (hold to aim), "dictation" (macOS), "pause",
+/// "game" (open / close Bug Dash), "none".
 /// Wheel slots run clockwise from the top: up, up-right, right, down-right, down, down-left, left, up-left.
 /// leftStick / rightStick: what moving the stick does, "mouse", "scroll" or "off".
 let defaultConfigJSON = """
@@ -41,6 +42,7 @@ let defaultConfigJSON = """
     "l2": "cmd+shift+i",
     "r2": "cmd+shift+e",
     "create": "cmd+shift+m",
+    "touchpad": "game",
     "options": "cmd+n",
     "up": "pageup",
     "down": "pagedown",
