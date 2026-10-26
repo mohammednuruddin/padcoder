@@ -12,7 +12,7 @@ func renderSnapshots(to dir: URL) {
     let token = NSObject()
     let model = LiveModel()
     model.pressed = ["cross", "r1", "up"]
-    model.selected = "triangle"
+    model.selected = "l3"
     model.hovered = "square"
     model.leftStick = CGPoint(x: 0.7, y: 0.4)
     model.r2 = 0.6

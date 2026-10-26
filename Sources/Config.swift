@@ -11,6 +11,7 @@ let activeFlagURL = supportDir.appendingPathComponent("active")
 /// Actions: a key combo ("return", "cmd+d", "ctrl+shift+tab"), "send:<text>" (type + Return),
 /// "type:<text>", "leftClick", "rightClick", "gyro" (hold to aim), "dictation" (macOS), "pause", "none".
 /// Wheel slots run clockwise from the top: up, up-right, right, down-right, down, down-left, left, up-left.
+/// leftStick / rightStick: what moving the stick does, "mouse", "scroll" or "off".
 let defaultConfigJSON = """
 {
   "buttons": {
@@ -65,6 +66,8 @@ let defaultConfigJSON = """
     "invertY": false,
     "horizontalAxis": "y"
   },
+  "leftStick": "mouse",
+  "rightStick": "scroll",
   "mouseSpeed": 1900,
   "scrollSpeed": 2400,
   "invertScroll": false,
@@ -122,6 +125,7 @@ final class Config {
     func action(_ button: String, layer: Bool) -> String? { section(layer ? "l1Layer" : "buttons")[button] as? String }
     func double(_ key: String, _ fallback: Double) -> Double { (data[key] as? NSNumber)?.doubleValue ?? fallback }
     func bool(_ key: String, _ fallback: Bool) -> Bool { data[key] as? Bool ?? fallback }
+    func string(_ key: String, _ fallback: String) -> String { data[key] as? String ?? fallback }
     var wheel: [String] { Array(((data["wheel"] as? [String]) ?? []).prefix(8)) }
 }
 

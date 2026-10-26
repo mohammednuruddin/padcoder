@@ -37,7 +37,7 @@ Open it from 🎮 → **Open PadCoder…**, or open the app again from Spotlight
   - Click any part to change what it does, or use **Record** to capture a shortcut.
   - Test buttons for rumble, the light bar, and L2/R2 trigger force (DualSense only).
 - **Prompt Wheel**: the 8 wheel prompts and the 4 quick prompts.
-- **Tuning**: stick, scroll, touchpad and gyro speeds, plus the invert switches.
+- **Tuning**: what each stick does (move the mouse, scroll, or off), stick, scroll, touchpad and gyro speeds, and the invert switches.
 - **Approvals**: approve from the pad on/off, and how long to wait.
 
 While the window is in front, the controller only lights things up there. It won't type or click.
@@ -52,7 +52,7 @@ While the window is in front, the controller only lights things up there. It won
 | △ Triangle | **Cmd+D**: Claude's dictation |
 | Options ≡ | **Cmd+Return**: accept a suggested task / submit a dialog |
 | D-pad | Arrow keys (hold to repeat) |
-| Left stick | Move the mouse |
+| Left stick | Move the mouse. Each stick can be set to move the mouse, scroll, or off. |
 | Right stick | Scroll |
 | R1 (hold) | **Gyro aim**: tilt the pad to fine-move the mouse |
 | R2 / L2 | Left click (hold to drag) / right click |
@@ -123,6 +123,8 @@ Actions:
 - `"send:text"` types the text and presses Return; `"type:text"` types it without Return
 - `"leftClick"`, `"rightClick"`, `"gyro"`, `"pause"`, `"dictation"` (macOS dictation), `"none"`
 - in `l1Layer`, `""` means "same as the normal press"
+
+`leftStick` and `rightStick` set what moving each stick does: `"mouse"`, `"scroll"` or `"off"`.
 
 ## Development
 - `./build.sh` builds `PadCoder.app` in the repo.

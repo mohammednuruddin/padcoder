@@ -256,6 +256,9 @@ struct InspectorPanel: View {
                     if let note = reserved(name) {
                         Text(note).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                     } else {
+                        if name == "l3" || name == "r3" {
+                            StickModePicker(title: "Moving the stick", value: store.text(nil, name == "l3" ? "leftStick" : "rightStick"))
+                        }
                         if let hint = hint(name) {
                             Label(hint, systemImage: "info.circle").font(.callout).foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -301,8 +304,8 @@ struct InspectorPanel: View {
 
     private func hint(_ name: String) -> String? {
         switch name {
-        case "l3": return "Moving the left stick moves the mouse. Set its speed in Tuning."
-        case "r3": return "Moving the right stick scrolls. With L1 held, it aims the prompt wheel."
+        case "l3": return "Speeds are on the Tuning page."
+        case "r3": return "With L1 held, the right stick always aims the prompt wheel."
         case "touchpad": return "One finger moves the mouse, and two fingers scroll."
         default: return nil
         }
@@ -462,6 +465,29 @@ struct ActionEditor: View {
     }
 }
 
+/// What moving a stick does: move the mouse, scroll, or nothing.
+struct StickModePicker: View {
+    let title: String
+    @Binding var value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(text: title)
+            Picker("", selection: $value) {
+                Text("Move mouse").tag("mouse")
+                Text("Scroll").tag("scroll")
+                Text("Off").tag("off")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(value == "off" ? "The stick is ignored. Pressing it still works."
+                 : value == "scroll" ? "Push to scroll the window under the pointer."
+                 : "Push to move the pointer.")
+                .font(.caption).foregroundColor(.secondary)
+        }
+    }
+}
+
 let reverseKeyCodes: [CGKeyCode: String] = {
     var names: [CGKeyCode: String] = [:]
     for (name, code) in keyCodes where names[code] == nil || ["return", "backspace", "escape"].contains(name) {
@@ -574,6 +600,8 @@ struct TuningPage: View {
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
             group("Sticks", "l.joystick") {
+                StickModePicker(title: "Left stick", value: store.text(nil, "leftStick"))
+                StickModePicker(title: "Right stick", value: store.text(nil, "rightStick"))
                 slider("Mouse speed", store.number(nil, "mouseSpeed", 1900), 400...4000)
                 slider("Scroll speed", store.number(nil, "scrollSpeed", 2400), 400...5000)
                 slider("Deadzone", store.number(nil, "stickDeadzone", 0.12), 0.02...0.4)

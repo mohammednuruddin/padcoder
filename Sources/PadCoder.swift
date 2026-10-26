@@ -333,17 +333,26 @@ final class PadCoder {
         let mouseSpeed = config.double("mouseSpeed", 1900)
         let scrollSpeed = config.double("scrollSpeed", 2400)
         let invert = config.bool("invertScroll", false) ? -1.0 : 1.0
+        // What moving each stick does: "mouse", "scroll" or "off".
+        func drive(_ mode: String, _ x: Float, _ y: Float) {
+            let cx = curve(x, deadzone), cy = curve(y, deadzone)
+            guard cx != 0 || cy != 0 else { return }
+            switch mode {
+            case "mouse": mouse.move(dx: cx * mouseSpeed * dt, dy: -cy * mouseSpeed * dt)
+            case "scroll": mouse.scroll(dx: -cx * scrollSpeed * dt * invert, dy: cy * scrollSpeed * dt * invert)
+            default: break
+            }
+        }
+        let leftMode = config.string("leftStick", "mouse"), rightMode = config.string("rightStick", "scroll")
         for ps in pads.values {
             let pad = ps.pad
-            let mx = curve(pad.leftThumbstick.xAxis.value, deadzone), my = curve(pad.leftThumbstick.yAxis.value, deadzone)
-            if mx != 0 || my != 0 { mouse.move(dx: mx * mouseSpeed * dt, dy: -my * mouseSpeed * dt) }
+            drive(leftMode, pad.leftThumbstick.xAxis.value, pad.leftThumbstick.yAxis.value)
 
             let rx = pad.rightThumbstick.xAxis.value, ry = pad.rightThumbstick.yAxis.value
             if ps.l1DownAt != nil {
                 updateWheel(ps, rx, ry, now)                 // right stick aims the wheel while L1 is held
             } else {
-                let sx = curve(rx, deadzone), sy = curve(ry, deadzone)
-                if sx != 0 || sy != 0 { mouse.scroll(dx: -sx * scrollSpeed * dt * invert, dy: sy * scrollSpeed * dt * invert) }
+                drive(rightMode, rx, ry)
             }
             if ps.gyro { applyGyro(ps, dt, now) }
         }
