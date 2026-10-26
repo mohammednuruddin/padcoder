@@ -206,8 +206,9 @@ function crash(g: Game, kind: Kind, t: number, wall: number) {
 // Runs the world on to `now`, a few milliseconds at a time: tokens taken,
 // bugs smashed or passed, or Clawd caught. 'none' when nothing shows it.
 export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
-  if (g.mode !== 'running') return 'none'
   const end = gameTime(g, now)
+  // A timer and a press can race for the clock: never run the world backwards.
+  if (g.mode !== 'running' || end <= g.simAt) return 'none'
   let changed = false
   for (let t = g.simAt; t < end; ) {
     t = Math.min(end, t + STEP_MS)

@@ -115,7 +115,9 @@ included, name the folder in the `env` block of `~/.claude/settings.json`:
 { "env": { "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/padcoder/mods/bug-dash" } }
 ```
 
-For a single terminal session, use `claude --plugin-dir mods/bug-dash` instead. The game draws in the
+For a single terminal session, use `claude --plugin-dir mods/bug-dash` instead. Loaded globally, every open
+session runs its own copy, so L1 + Touchpad starts the game in each of them; keep one Claude window open
+while you play. The game draws in the
 desktop app; a terminal has no SVG, so there the band is left as it was.
 
 ## Power use
