@@ -1,0 +1,5 @@
+# Build output
+PadCoder.app/
+
+# macOS
+.DS_Store
