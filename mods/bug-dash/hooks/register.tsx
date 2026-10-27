@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
-import { act, advance, drawScene, newGame, nextWake, pause, sceneAlt, widthFor, type Action, type PauseReason } from './scene'
+import { SERVER, asked, boardOf, boardPath, joined, runBody, sentOf, type Answer, type Player } from './race'
+import { act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type PauseReason, type Race } from './scene'
 
 type Signal = Action | 'on' | 'off' | 'show' | 'hide'
 
@@ -30,6 +31,13 @@ let timer: Timer | undefined
 let lastCrash = game.crash
 // Whether the pad plays this session's run: from game.on to game.off.
 let padPlays = false
+// The daily race, once joined: who races here, the board, and its day.
+let player: Player | undefined
+let race: Race | undefined
+let raceDay = ''
+let raceAt = -Infinity
+let runDay = ''
+const STALE_MS = 10 * 60_000
 
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
@@ -42,9 +50,48 @@ async function settle($: EngineInterface) {
     lastCrash = game.crash
     post($, THUD)
     if (game.isNewBest) await $.store.set('best', game.best)
+    if (player !== undefined && game.log.length > 0) void submit($, player)
   }
   const wait = nextWake(game, await $.clock.now())
   if (wait !== undefined) timer = $.clock.after(wait, () => void wake($))
+}
+
+// One request to the race server; undefined when it can't be reached.
+// BUG_DASH_SERVER points the mod at another server, such as a local one.
+async function call($: EngineInterface, path: string, body?: unknown): Promise<Answer | undefined> {
+  const server = (await $.env.get('BUG_DASH_SERVER')) ?? SERVER
+  if (server === '') return undefined
+  try {
+    const answer = await $.http.fetch(server + path, asked(body))
+    return { status: answer.status, text: answer.text }
+  } catch {
+    return undefined
+  }
+}
+
+// Sends the run just ended, then fetches the board it changed.
+async function submit($: EngineInterface, who: Player) {
+  race = { ...(race ?? { top: [], total: 0 }), sent: 'sending' }
+  redraw($)
+  const sent = sentOf(await call($, '/run', runBody(who, runDay, game.log.slice(), game.score)))
+  if (race !== undefined) race = { ...race, sent }
+  redraw($)
+  await refresh($)
+}
+
+// Fetches today's board and ghosts; the run goes on offline if it can't.
+async function refresh($: EngineInterface) {
+  if (player === undefined) return
+  const now = await $.clock.now()
+  const day = dayOf(now)
+  const fresh = boardOf(await call($, boardPath(day, player.name)))
+  if (fresh === undefined || player === undefined) return
+  const { ghosts, ...standing } = fresh
+  race = { ...standing, sent: race?.sent }
+  raceDay = day
+  raceAt = now
+  setGhosts(game, daySeed(day), ghosts)
+  redraw($)
 }
 
 async function wake($: EngineInterface) {
@@ -58,6 +105,7 @@ async function handle($: EngineInterface, signal: Signal) {
   let changed = false
   if (signal === 'on' || signal === 'show') {
     await update($, shown, () => true)
+    if (now - raceAt > STALE_MS) void refresh($)
     if (signal === 'on') {
       padPlays = true
       if (game.mode === 'paused') changed = act(game, 'jump', now)
@@ -72,7 +120,16 @@ async function handle($: EngineInterface, signal: Signal) {
       if (padPlays) post($, HIDDEN)
     }
     padPlays = false
-  } else if (await read($, shown)) changed = act(game, signal, now)
+  } else if (await read($, shown)) {
+    // A new run is on today's course, the one everyone runs.
+    if (game.mode === 'ready' || game.mode === 'over') {
+      runDay = dayOf(now)
+      game.seed = daySeed(runDay)
+      if (race !== undefined) race = { ...race, sent: undefined }
+      if (player !== undefined && raceDay !== runDay) void refresh($)
+    }
+    changed = act(game, signal, now)
+  }
   if (changed) redraw($)
   await settle($)
 }
@@ -80,6 +137,27 @@ async function handle($: EngineInterface, signal: Signal) {
 async function stop($: EngineInterface, why: PauseReason) {
   if (pause(game, await $.clock.now(), why)) redraw($)
   await settle($)
+}
+
+async function joinRace($: EngineInterface, name: string) {
+  if (player !== undefined) return `You race as ${player.name}. /bugdash leave first to change.`
+  if (name === '') return 'Pick a name: /bugdash join <name>, 2 to 16 letters, digits, _ or -.'
+  if (((await $.env.get('BUG_DASH_SERVER')) ?? SERVER) === '') return "The race server isn't up yet."
+  const made = joined(await call($, '/join', { name }))
+  if (typeof made === 'string') return made
+  player = made
+  await $.store.set('player', made)
+  await refresh($)
+  return `You're in the daily race as ${made.name}. Each run on today's course is sent when Clawd is caught, and the leader's and your best run alongside you as ghosts.`
+}
+
+async function topText($: EngineInterface) {
+  const day = dayOf(await $.clock.now())
+  const today = boardOf(await call($, boardPath(day, player?.name)))
+  if (today === undefined) return "Couldn't reach the race."
+  if (today.top.length === 0) return `Nobody has run ${day} yet.`
+  const rows = today.top.map((row, i) => `${i + 1}. ${row.name} ${row.score}`).join('\n')
+  return `Bug Dash, ${day} (${today.total} running):\n${rows}${today.you ? `\nYou: #${today.you.rank}, ${today.you.score}` : ''}`
 }
 
 async function listen($: EngineInterface) {
@@ -109,11 +187,29 @@ export const register: Register = on => {
     await $.command.register({ name: 'bugdash', description: 'Show or hide Bug Dash, a runner to play above the prompt while Claude works' })
     const saved = await $.store.get('best')
     if (typeof saved === 'number') game.best = Math.max(game.best, saved)
+    const kept = (await $.store.get('player')) as Partial<Player> | undefined
+    if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
     void listen($)
+    void refresh($)
     return started
   })
 
-  on('command.run', { command: 'bugdash' }, async $ => {
+  // /bugdash shows or hides it; join, leave and top run the daily race.
+  on('command.run', { command: 'bugdash' }, async ($, e) => {
+    const [word = '', name = ''] = e.args.trim().split(/\s+/)
+    if (word === 'join') return { text: await joinRace($, name) }
+    if (word === 'leave') {
+      if (player === undefined) return { text: 'You are not in the daily race.' }
+      const left = player.name
+      player = undefined
+      race = undefined
+      setGhosts(game, game.seed, [])
+      await $.store.delete('player')
+      redraw($)
+      return { text: `Bug Dash no longer sends runs from here. The name ${left} stays taken.` }
+    }
+    if (word === 'top') return { text: await topText($) }
+    if (word !== '') return { text: 'Use /bugdash to show or hide it, /bugdash join <name> to race online, /bugdash top for the board, /bugdash leave to stop.' }
     const showing = !(await read($, shown))
     await handle($, showing ? 'show' : 'hide')
     return {
@@ -154,9 +250,8 @@ export const register: Register = on => {
     if (!('Svg' in elements)) return next(e)
     const { Box, Button, Svg } = elements
 
-    game.width = widthFor(e.props.bodyColumns)
     const said = await read($, claude)
-    const view = { width: game.width, claude: e.props.isWorking ? 'working' : said === 'working' ? 'idle' : said } as const
+    const view = { width: widthFor(e.props.bodyColumns), claude: e.props.isWorking ? 'working' : said === 'working' ? 'idle' : said, race } as const
     const now = await $.clock.now()
     const beneath = await next(e).catch(() => undefined)
     const press = (signal: Signal) => () => handle($, signal)

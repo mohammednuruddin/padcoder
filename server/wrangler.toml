@@ -1,0 +1,10 @@
+# Bug Dash's daily race. Deploy with `npx wrangler@4.140.0 deploy` from this folder.
+name = "bug-dash"
+main = "src/index.ts"
+compatibility_date = "2026-09-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bug-dash"
+# Replaced with the id `wrangler d1 create bug-dash` prints.
+database_id = "00000000-0000-0000-0000-000000000000"

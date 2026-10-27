@@ -106,11 +106,24 @@ grabbing ✦ tokens.
   and two banners from level 12. Points count double from level 5, triple from level 9 and so on. It
   stops getting harder at level 41, six minutes in.
 - When Claude **finishes** or **needs your approval**, the run pauses and says why, and the pad goes
-  straight back to Claude. The pad rumbles when Clawd is caught.
+  straight back to Claude. Resuming counts down 3, 2, 1 first. The pad rumbles when Clawd is caught.
 - In game mode the pad sends notifications (`com.padcoder.game.jump` and so on), not keystrokes, so
   nothing is typed into Claude by accident.
 - It is cheap to run. The mod redraws only when something happens, such as an obstacle reaching Clawd
   or a point scored, and CSS animation moves the scene in between. Paused or hidden, it costs nothing.
+
+### The daily race
+Everyone runs the same course each day (UTC), and you can race it online:
+
+- `/bugdash join <name>` takes a name. From then on, each run is sent when Clawd is caught. The race
+  server plays it again from your moves with the game's own rules, so only scores really played count,
+  and keeps your best of the day.
+- The ready card shows who leads today and where you stand; the game-over card shows your rank.
+- Two ghosts run with you: the day's leader and your own best, pale Clawds just behind yours, with
+  their names and scores on the ground beneath.
+- `/bugdash top` lists today's top ten. `/bugdash leave` stops sending runs; your name stays taken.
+- What is sent: your name, and each run's moves and score. Nothing about Claude or your work. Until
+  you join, the mod sends nothing, except the request for the board when you run `/bugdash top`.
 
 ### Install Bug Dash
 At the prompt of a Claude Code terminal session:
@@ -194,8 +207,15 @@ Actions:
 - `./build.sh install` also replaces `/Applications/PadCoder.app` and the hook script, and quits the running copy.
   Run `open /Applications/PadCoder.app` afterwards.
 - `PadCoder.app/Contents/MacOS/PadCoder --snapshot <dir>` renders the window and HUDs to PNGs, for checking layout.
-- `claude plugin test mods/bug-dash` runs the mod's tests, including a bot that plays two minutes of the course.
+- `claude plugin test mods/bug-dash` runs the mod's tests, including a bot that plays seven minutes of the course
+  and checks that every run replays exactly from its moves.
   `claude --plugin-dir mods/bug-dash` runs the mod from your checkout, reloading as you edit it.
+- `server/` is the daily race's server: a Cloudflare Worker with a D1 database. It imports the mod's own
+  `scene.ts` to replay runs. To run it locally, from `server/`:
+  `npx wrangler@4.140.0 d1 execute bug-dash --local --file schema.sql`, then `npx wrangler@4.140.0 dev --local`.
+  `BUG_DASH_SERVER=http://127.0.0.1:8787 claude --plugin-dir mods/bug-dash` points the mod at it.
+  To host your own: `npx wrangler login`, `npx wrangler d1 create bug-dash` (its id goes in `wrangler.toml`),
+  `npx wrangler d1 execute bug-dash --remote --file schema.sql`, then `npx wrangler deploy`.
 
 | File | What's in it |
 |---|---|
@@ -207,7 +227,9 @@ Actions:
 | `Sources/Overlay.swift` | Prompt wheel and approval HUD |
 | `hooks/permission-hook.sh` | The Claude Code `PermissionRequest` hook |
 | `mods/bug-dash/hooks/scene.ts` | Bug Dash's rules and its SVG scene |
-| `mods/bug-dash/hooks/register.tsx` | The mod's hooks: the band, `/bugdash`, the pad's signals |
+| `mods/bug-dash/hooks/register.tsx` | The mod's hooks: the band, `/bugdash`, the pad's signals, the race's requests |
+| `mods/bug-dash/hooks/race.ts` | What goes to the race server and how its answers are read |
+| `server/src/index.ts` | The race server: joining, the daily board and ghosts, replaying runs |
 
 ## Troubleshooting
 The log is at `~/Library/Logs/PadCoder.log` (🎮 → Open Log). It records button presses,

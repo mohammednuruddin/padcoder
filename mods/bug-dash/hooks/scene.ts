@@ -29,7 +29,7 @@ const DIVE_V = -0.42
 const CEILING = 50
 const SLIDE_MS = 520
 const DASH_MS = 420
-const GRACE_MS = 900
+const COUNTDOWN_MS = 1200 // a resumed run counts 3, 2, 1 with the world still
 const REGEN = 1 / 6500 // dash charges a millisecond
 const CHARGES = 3
 
@@ -44,13 +44,23 @@ const GAP_MS = 560 // the shortest gap: a whole jump
 const SPREAD_MS = 820 // how much longer a gap may be at first
 const LAST_SPREAD_MS = 280 // and at the last level
 
+// The rules run in 4 ms steps on a fixed grid of game time, and course is
+// laid out a fixed way ahead, so a run is a function of its seed and its
+// moves alone: the server plays it again to check a score.
+export const RULES_VERSION = 1
 const STEP_MS = 4
+export const WIDEST = 1400 // the widest band drawn
+export const LIMIT_MS = 20 * 60_000 // the longest run the race ranks
+const GHOSTS = 2
+const AHEAD = 2 * WIDEST // course is laid out at least this far ahead
 const WORLD_MS = 20000 // how long one drawing's scroll runs on
 const POP_MS = 750
 const LEVEL_POP_MS = 1400
 const POINTS = { pass: 10, token: 25, smash: 15 } as const
 
 export type Action = 'jump' | 'slide' | 'dash' | 'pause'
+// A move that took, at a whole millisecond of game time.
+export type Move = readonly [t: number, action: Exclude<Action, 'pause'>]
 export type Mode = 'ready' | 'running' | 'paused' | 'over'
 export type PauseReason = 'you' | 'pad' | 'finished' | 'needsYou' | 'hidden'
 type Kind = 'bug' | 'fail' | 'token'
@@ -63,20 +73,22 @@ type Pop = { readonly kind: 'token' | 'smash' | 'double' | 'level'; readonly y: 
 export type Game = {
   mode: Mode
   why: PauseReason
-  width: number
+  seed: number
   rng: number
-  // Game time stands still unless running: `gameAt` at the wall clock's `clockAt`.
+  // Game time stands still unless running: `gameAt` at the wall clock's
+  // `clockAt`, which a resume sets after the countdown.
   gameAt: number
   clockAt: number
+  countdownUntil: number
   simAt: number
   air: Air | null
   jumps: number
   slideUntil: number
   dashUntil: number
-  graceUntil: number
   energy: number
   energyAt: number
   things: Thing[]
+  log: Move[]
   nextId: number
   aheadTo: number
   level: number
@@ -86,24 +98,55 @@ export type Game = {
   isNewBest: boolean
   pops: Pop[]
   crash: { readonly kind: Kind; readonly h: number; readonly wall: number } | null
+  ghosts: Ghost[]
 }
 
-export type View = { readonly width: number; readonly claude: ClaudeStatus }
+// Another player's run of the day, raced as a ghost from its moves.
+export type GhostRun = { readonly name: string; readonly score: number; readonly moves: readonly Move[] }
+type Ghost = GhostRun & { readonly seed: number; readonly endsAt: number; game: Game; next: number }
 
-export const widthFor = (columns: number) => Math.min(1400, Math.max(360, Math.round(columns * 8)))
+// The daily race as the band shows it, once the player has joined.
+export type Race = {
+  readonly top: readonly { readonly name: string; readonly score: number }[]
+  readonly total: number
+  readonly you?: { readonly rank: number; readonly score: number }
+  // The last run sent: on its way, lost, or where it put the player.
+  readonly sent?: 'sending' | 'failed' | { readonly rank: number; readonly total: number; readonly best: number }
+}
+
+export type View = { readonly width: number; readonly claude: ClaudeStatus; readonly race?: Race }
+
+export const widthFor = (columns: number) => Math.min(WIDEST, Math.max(360, Math.round(columns * 8)))
 
 export const newGame = (): Game => ({
-  mode: 'ready', why: 'you', width: 800, rng: 1, gameAt: 0, clockAt: 0, simAt: 0, air: null, jumps: 0,
-  slideUntil: 0, dashUntil: 0, graceUntil: 0, energy: 1, energyAt: 0, things: [], nextId: 1, aheadTo: 0,
-  level: 0, charges: 1, score: 0, best: 0, isNewBest: false, pops: [], crash: null,
+  mode: 'ready', why: 'you', seed: 1, rng: 1, gameAt: 0, clockAt: 0, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
+  slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, things: [], log: [], nextId: 1, aheadTo: 0,
+  level: 0, charges: 1, score: 0, best: 0, isNewBest: false, pops: [], crash: null, ghosts: [],
 })
 
-export const gameTime = (g: Game, now: number) => (g.mode === 'running' ? g.gameAt + (now - g.clockAt) : g.gameAt)
+export const gameTime = (g: Game, now: number) => (g.mode === 'running' ? g.gameAt + Math.max(0, now - g.clockAt) : g.gameAt)
+
+// Everyone runs the same course on a given day, in UTC.
+export const dayOf = (wall: number) => new Date(wall).toISOString().slice(0, 10)
+export function daySeed(day: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < day.length; i++) h = Math.imul(h ^ day.charCodeAt(i), 0x01000193)
+  return h | 0
+}
 
 // ------------------------------------------------------------------ motion
 
 const levelAt = (t: number) => Math.max(0, Math.floor(t / LEVEL_MS))
-const speedOf = (level: number) => TOP_SPEED - (TOP_SPEED - BASE_SPEED) * RAMP ** Math.min(level, LAST_LEVEL)
+// RAMP to the power of each level, by repeated multiplication: exact in every
+// engine, where a power function need not be, so the server's replay lands
+// where the run did.
+const DECAY = Array.from({ length: LAST_LEVEL + 1 }, (_, level) => {
+  let k = 1
+  for (let l = 0; l < level; l++) k *= RAMP
+  return k
+})
+const decay = (level: number) => DECAY[Math.min(level, LAST_LEVEL)] ?? 0
+const speedOf = (level: number) => TOP_SPEED - (TOP_SPEED - BASE_SPEED) * decay(level)
 export const speedAt = (t: number) => speedOf(levelAt(t))
 // Points count for more the longer the run lasts.
 export const multiplier = (level: number) => 1 + Math.floor(level / 4)
@@ -255,7 +298,7 @@ function generate(g: Game, upTo: number) {
   while (g.aheadTo < upTo) {
     const level = Math.min(LAST_LEVEL, levelAt(timeAtDist(g.aheadTo)))
     const speed = speedOf(level)
-    const spread = LAST_SPREAD_MS + (SPREAD_MS - LAST_SPREAD_MS) * RAMP ** level
+    const spread = LAST_SPREAD_MS + (SPREAD_MS - LAST_SPREAD_MS) * decay(level)
     const x = g.aheadTo + speed * (GAP_MS + random(g) * spread) + 30
     g.aheadTo = pick(g, level)(g, x, speed)
   }
@@ -266,11 +309,46 @@ function generate(g: Game, upTo: number) {
 
 function start(g: Game, now: number) {
   Object.assign(g, {
-    mode: 'running', why: 'you', rng: Math.floor(now) | 1, gameAt: 0, clockAt: now, simAt: 0, air: null, jumps: 0,
-    slideUntil: 0, dashUntil: 0, graceUntil: 0, energy: 1, energyAt: 0, things: [], aheadTo: RX + 300,
+    mode: 'running', why: 'you', rng: g.seed, gameAt: 0, clockAt: now, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
+    slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, things: [], log: [], aheadTo: RX + 300,
     level: 0, charges: 1, score: 0, isNewBest: false, pops: [], crash: null,
   } satisfies Partial<Game>)
-  generate(g, g.width * 3)
+  generate(g, AHEAD + WIDEST)
+  g.ghosts = g.ghosts.filter(ghost => ghost.seed === g.seed)
+  for (const ghost of g.ghosts) setOff(ghost)
+}
+
+// Ghosts: other runs of the same course, played again from their moves in
+// step with the player's game time.
+export function setGhosts(g: Game, seed: number, runs: readonly GhostRun[]) {
+  // Mid-run on another day's course, they wait for the next run.
+  if ((g.mode === 'running' || g.mode === 'paused') && seed !== g.seed) return
+  g.ghosts = runs.slice(0, GHOSTS).map(run => {
+    const ghost = { ...run, seed, endsAt: replay(seed, run.moves, LIMIT_MS).gameAt, game: newGame(), next: 0 }
+    setOff(ghost)
+    // Joining a run under way, or one just ended, they catch up with it.
+    if (g.mode !== 'ready' && seed === g.seed) follow(ghost, g.simAt)
+    return ghost
+  })
+}
+
+function setOff(ghost: Ghost) {
+  ghost.game = newGame()
+  ghost.game.seed = ghost.seed
+  start(ghost.game, 0)
+  ghost.next = 0
+}
+
+// Plays a ghost on to game time `t`; true when it moved or was caught.
+function follow(ghost: Ghost, t: number): boolean {
+  const run = ghost.game
+  if (run.mode !== 'running') return false
+  let moved = false
+  for (let m = ghost.moves[ghost.next]; m !== undefined && m[0] <= t; m = ghost.moves[++ghost.next]) {
+    if (runTo(run, m[0], m[0]) === 'over') return true
+    moved = move(run, m[1], m[0], m[0]) || moved
+  }
+  return runTo(run, t, t) === 'over' || moved
 }
 
 function crash(g: Game, kind: Kind, t: number, wall: number) {
@@ -285,22 +363,27 @@ function crash(g: Game, kind: Kind, t: number, wall: number) {
 
 const lifetime = (pop: Pop) => (pop.kind === 'level' ? LEVEL_POP_MS : POP_MS)
 
-// Runs the world on to `now`, a few milliseconds at a time: tokens taken,
-// bugs smashed or passed, or Clawd caught. 'none' when nothing shows it.
-export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
-  const end = gameTime(g, now)
-  // A timer and a press can race for the clock: never run the world backwards.
-  if (g.mode !== 'running' || end <= g.simAt) return 'none'
+// Runs the world on to game time `end`, a grid step at a time, laying course
+// as it goes: tokens taken, bugs smashed or passed, or Clawd caught. However
+// often it is called, the same moves meet the course the same way.
+function runTo(g: Game, end: number, now: number): 'none' | 'changed' | 'over' {
+  if (g.mode !== 'running') return 'none'
   let changed = false
-  for (let t = g.simAt; t < end; ) {
-    t = Math.min(end, t + STEP_MS)
+  for (let t = g.simAt + STEP_MS; t <= end; t += STEP_MS) {
+    g.simAt = t
     const d = distAt(t)
+    if (g.aheadTo < d + AHEAD) {
+      generate(g, d + AHEAD + WIDEST)
+      changed = true
+    }
     const times = multiplier(levelAt(t))
     if (g.air !== null && t >= landTime(g.air)) {
       g.air = null
       g.jumps = 0
     }
     for (const thing of g.things) {
+      // Things lie in order along the course: the rest have yet to reach Clawd.
+      if (thing.x - d >= RUN_R) break
       if (thing.done !== undefined) continue
       if (thing.x - d + BOX[thing.kind].r <= RUN_L) {
         thing.done = thing.kind === 'token' ? 'missed' : 'passed'
@@ -320,34 +403,41 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
         g.score += POINTS.smash * times
         g.pops.push({ kind: 'smash', y: 0, wall, value: POINTS.smash * times })
         changed = true
-      } else if (t >= g.graceUntil) {
+      } else {
         crash(g, thing.kind, t, wall)
         return 'over'
       }
     }
   }
-  g.simAt = end
-  const d = distAt(end)
-  const level = levelAt(end)
-  if (level > g.level) g.pops.push({ kind: 'level', y: 0, wall: now - (end - level * LEVEL_MS), value: level })
+  const at = Math.max(end, g.simAt)
+  const d = distAt(at)
+  const level = levelAt(at)
+  if (level > g.level) g.pops.push({ kind: 'level', y: 0, wall: now - (at - level * LEVEL_MS), value: level })
   g.things = g.things.filter(thing => thing.x - d > -80)
   g.pops = g.pops.filter(pop => now - pop.wall < lifetime(pop))
-  if (g.aheadTo < d + g.width * 2) {
-    generate(g, d + g.width * 3)
-    changed = true
-  }
-  const charges = Math.floor(energyAt(g, end))
+  const charges = Math.floor(energyAt(g, at))
   if (level !== g.level || charges !== g.charges) changed = true
   g.level = level
   g.charges = charges
   return changed ? 'changed' : 'none'
 }
 
-// When the run can next change, in wall milliseconds from `now`: a thing
-// reaching Clawd, Clawd touching one as things stand, the next level, a dash
-// charge filling, the course needing more laid out.
+// Runs the run on to `now`. 'none' when nothing shows it.
+export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
+  const counted = g.countdownUntil !== 0 && now >= g.countdownUntil
+  if (counted) g.countdownUntil = 0
+  const result = runTo(g, gameTime(g, now), now)
+  let ghosts = false
+  for (const ghost of g.ghosts) ghosts = follow(ghost, gameTime(g, now)) || ghosts
+  return (counted || ghosts) && result === 'none' ? 'changed' : result
+}
+
+// When the run can next change, in wall milliseconds from `now`: the
+// countdown ending, a thing reaching Clawd, Clawd touching one as things
+// stand, the next level, a dash charge filling, the course needing more laid out.
 export function nextWake(g: Game, now: number): number | undefined {
   if (g.mode !== 'running') return undefined
+  if (now < g.countdownUntil) return Math.ceil(g.countdownUntil - now) + 1
   const t = gameTime(g, now)
   let next = Infinity
   for (const thing of g.things) {
@@ -361,17 +451,21 @@ export function nextWake(g: Game, now: number): number | undefined {
     }
     let at = exit
     for (let s = t; s < exit; s += STEP_MS) {
-      if (touches(g, thing, s) && (thing.kind === 'token' || s < g.dashUntil || s >= g.graceUntil)) {
+      if (touches(g, thing, s)) {
         at = s
         break
       }
     }
     next = Math.min(next, at)
   }
+  for (const ghost of g.ghosts) {
+    if (ghost.game.mode !== 'running') continue
+    next = Math.min(next, ghost.moves[ghost.next]?.[0] ?? Infinity, ghost.endsAt)
+  }
   next = Math.min(next, (levelAt(t) + 1) * LEVEL_MS)
   const e = energyAt(g, t)
   if (e < CHARGES) next = Math.min(next, t + (Math.floor(e) + 1 - e) / REGEN)
-  next = Math.min(next, timeAtDist(g.aheadTo - g.width * 2))
+  next = Math.min(next, timeAtDist(g.aheadTo - AHEAD))
   return Math.max(4, Math.ceil(next - t) + 1)
 }
 
@@ -384,12 +478,14 @@ export function pause(g: Game, now: number, why: PauseReason): boolean {
   if (advance(g, now) === 'over') return true
   g.gameAt = gameTime(g, now)
   g.clockAt = now
+  g.countdownUntil = 0
   g.mode = 'paused'
   g.why = why
   return true
 }
 
 // What a button does now: ✕ starts, resumes or jumps; the rest act mid-run.
+// A move that takes goes in the log with its game time.
 export function act(g: Game, action: Action, now: number): boolean {
   if (g.mode === 'ready' || g.mode === 'over') {
     if (action !== 'jump') return false
@@ -398,14 +494,23 @@ export function act(g: Game, action: Action, now: number): boolean {
   }
   if (g.mode === 'paused') {
     if (action !== 'jump' && action !== 'pause') return false
+    // A count of 3, 2, 1 with the world still, not a spell of safety a pause
+    // could buy before every bug.
     g.mode = 'running'
-    g.clockAt = now
-    g.graceUntil = g.gameAt + GRACE_MS
+    g.clockAt = now + COUNTDOWN_MS
+    g.countdownUntil = g.clockAt
     return true
   }
   if (action === 'pause') return pause(g, now, 'you')
-  if (advance(g, now) === 'over') return true
-  const t = gameTime(g, now)
+  if (now < g.countdownUntil) return false
+  const t = Math.round(gameTime(g, now))
+  if (runTo(g, t, now) === 'over') return true
+  if (!move(g, action, t, now)) return false
+  g.log.push([t, action])
+  return true
+}
+
+function move(g: Game, action: Move[1], t: number, now: number): boolean {
   if (g.air !== null && t >= landTime(g.air)) {
     g.air = null
     g.jumps = 0
@@ -441,6 +546,20 @@ export function act(g: Game, action: Action, now: number): boolean {
   return true
 }
 
+// A run played again from its seed and moves, as the server checks one: on
+// to the crash, or to `limit` ms of game time. Moves out of order end it.
+export function replay(seed: number, log: readonly Move[], limit: number): Game {
+  const g = newGame()
+  g.seed = seed
+  start(g, 0)
+  for (const [t, action] of log) {
+    if (!(t >= g.simAt && t <= limit) || runTo(g, t, t) === 'over') break
+    move(g, action, t, t)
+  }
+  runTo(g, limit, limit)
+  return g
+}
+
 const STATUS_TEXT: Readonly<Record<ClaudeStatus, string>> = {
   idle: '',
   working: 'Claude is working',
@@ -456,17 +575,34 @@ const PAUSE_TEXT: Readonly<Record<PauseReason, string>> = {
   needsYou: 'Claude needs you · answer it, then ✕ to dash on',
 }
 
+// Where today's race stands, for the ready card.
+function standing(race: Race) {
+  const leader = race.top[0]
+  if (leader === undefined) return "Today's course: nobody has run it yet"
+  return `Today: ${leader.name} leads with ${leader.score}` + (race.you ? ` · you're #${race.you.rank} of ${race.total}` : '')
+}
+
+// Where the last run sent went, for the over card.
+function sentText(race: Race | undefined) {
+  const sent = race?.sent
+  if (sent === undefined) return undefined
+  if (sent === 'sending') return 'Sending your run'
+  if (sent === 'failed') return "Couldn't reach the race"
+  return `#${sent.rank} of ${sent.total} today · best ${sent.best}`
+}
+
 export function sceneAlt(g: Game, view: View): string {
   const status = STATUS_TEXT[view.claude]
+  const race = view.race
   switch (g.mode) {
     case 'ready':
-      return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.`
+      return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.${race ? ` ${standing(race)}.` : ''}`
     case 'running':
       return `Bug Dash, running: ${g.score} points, level ${g.level + 1}, best ${g.best}.${status ? ` ${status}.` : ''}`
     case 'paused':
       return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, level ${g.level + 1}, best ${g.best}.`
     case 'over':
-      return `Bug Dash, over: ${g.crash?.kind === 'fail' ? 'tests failed' : 'squashed by a bug'} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.`
+      return `Bug Dash, over: ${g.crash?.kind === 'fail' ? 'tests failed' : 'squashed by a bug'} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.${sentText(race) ? ` ${sentText(race)}.` : ''}`
   }
 }
 
@@ -616,12 +752,12 @@ const CSS = `
 .code{opacity:.2}.tile{fill:#3a2f33}.edge{fill:${CLAY}}.star{fill:#fff}.shade{fill:#000;opacity:.35}.rope{stroke:#8b7d75}
 .txt{fill:#f3ede7}.dim{fill:#a39a93}.chip{fill:#000;fill-opacity:.3}.card{fill:#17141a;fill-opacity:.9;stroke:#40363a}
 .veil{fill:#0c0a0e;opacity:.42}.frame{fill:none;stroke:#fff;stroke-opacity:.08}.pip{fill:${CLAY}}.pip0{fill:none;stroke:${CLAY};stroke-opacity:.6}
-.lv{fill:${CLAY}}.mul{fill:#f2bd63}.up{fill:#ffe2b6;stroke:#140f14;stroke-opacity:.55}
+.lv{fill:${CLAY}}.mul{fill:#f2bd63}.ghost{opacity:.4;filter:grayscale(1) brightness(1.8)}.up{fill:#ffe2b6;stroke:#140f14;stroke-opacity:.55}
 @media (prefers-color-scheme: light){
 .sky{fill:url(#skyL)}.gnd{fill:url(#gndL)}.farB{fill:#eadfd2}.farA{fill:#e0d0c0}.lit{fill:#c58f6c;opacity:.35}
 .code{opacity:.32}.tile{fill:#d3bfab}.star{display:none}.shade{opacity:.13}.rope{stroke:#a8968a}
 .txt{fill:#2b2420}.dim{fill:#7d736b}.chip{fill:#fff;fill-opacity:.6}.card{fill:#fffaf4;fill-opacity:.95;stroke:#e3d5c6}
-.veil{fill:#fffaf4;opacity:.45}.frame{stroke:#000;stroke-opacity:.08}.mul{fill:#a8701c}.up{fill:#b5593c;stroke:#fffaf4;stroke-opacity:.85}}
+.veil{fill:#fffaf4;opacity:.45}.frame{stroke:#000;stroke-opacity:.08}.mul{fill:#a8701c}.ghost{opacity:.3;filter:grayscale(1) brightness(.55)}.up{fill:#b5593c;stroke:#fffaf4;stroke-opacity:.85}}
 .lb{opacity:0}.spin{transform-box:fill-box;transform-origin:center}.swing{transform-box:fill-box;transform-origin:50% 0}
 .ring{transform-box:fill-box;transform-origin:center}
 @keyframes on{to{opacity:1}}@keyframes off{to{opacity:0}}
@@ -638,7 +774,7 @@ const CSS = `
 @keyframes shake{0%,100%{transform:translate(0,0)}20%{transform:translate(-3px,1px)}40%{transform:translate(3px,-1px)}60%{transform:translate(-2px,0)}80%{transform:translate(2px,1px)}}
 @keyframes dust{from{transform:translateX(0);opacity:.7}to{transform:translateX(-12px);opacity:0}}
 @keyframes zip{from{transform:translateX(0)}to{transform:translateX(-140px)}}
-@keyframes flicker{0%,49%{opacity:1}50%,100%{opacity:.25}}
+@keyframes count{from{transform:scale(1.6);opacity:0}25%{opacity:1}to{transform:scale(1)}}
 @keyframes lvl{0%{opacity:0;transform:translateY(5px)}14%,78%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-6px)}}
 @keyframes glow{from{fill:#ffe2b6}}
 @keyframes intro{from{transform:translateY(6px);opacity:0}to{transform:translateY(0);opacity:1}}
@@ -701,7 +837,7 @@ function world(g: Game, width: number, d: number, speed: number, live: boolean, 
       }
       return `<g transform="translate(${n(thing.x - d + 7)} ${GROUND - thing.h - 6})"><g class="bob" style="${lag}"><circle r="9" fill="url(#tokGlow)"/><g class="spin"><use href="#spark"/></g></g></g>`
     })
-    .join('')
+    .join('') + fallenGhosts(g, d)
   if (!live) return `<g>${drawn}</g>`
   css.push(`@keyframes world{to{transform:translateX(${n(-speed * WORLD_MS)}px)}}`)
   return `<g style="animation:world ${WORLD_MS}ms linear forwards">${drawn}</g>`
@@ -772,9 +908,54 @@ function runner(g: Game, t: number, now: number, live: boolean, css: string[]) {
       `</g>`
   }
 
-  const graceLeft = live ? g.graceUntil - t : 0
-  const flicker = graceLeft > 0 ? ` style="animation:flicker 140ms linear ${Math.ceil(graceLeft / 140)}"` : ''
-  return `${shadow}${lines}<g transform="translate(${RX} ${top})" shape-rendering="crispEdges"><g${flicker}><g${hop}>${dash}${poses.join('')}</g></g></g>`
+  return `${shadow}${lines}<g transform="translate(${RX} ${top})" shape-rendering="crispEdges"><g${hop}>${dash}${poses.join('')}</g></g>`
+}
+
+const esc = (text: string) => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)
+const ghostX = (i: number) => RX - 9 * (i + 1)
+
+// Ghosts run a step behind Clawd, faint, going through the poses their moves
+// make, with their names and scores on the ground beneath.
+function ghostRunners(g: Game, t: number, live: boolean, css: string[]) {
+  return g.ghosts
+    .map((ghost, i) => {
+      const run = ghost.game
+      const tag = `<text class="dim" x="${ghostX(i) + 27}" y="${GROUND + 9 + i * 7}" text-anchor="middle" font-size="6.5" ${FONT}>${esc(ghost.name)} ${run.mode === 'over' ? '✕ ' : ''}${run.score}</text>`
+      if (run.mode !== 'running') return tag
+      const h = heightAt(run.air, t)
+      const airEnd = run.air === null ? 0 : landTime(run.air) - t
+      const slideEnd = run.slideUntil - t
+      let hop = h > 0 ? ` transform="translate(0 ${n(-h)})"` : ''
+      let poses: string
+      if (!live) {
+        poses = h > 0 ? '<use href="#cAir"/>' : isSliding(run, t) ? '<use href="#cSlide" y="10"/>' : '<use href="#cRunA"/>'
+      } else {
+        if (run.air !== null && airEnd > 8) {
+          const air = run.air
+          const frames = Array.from({ length: 13 }, (_, k) => [(k / 12) * 100, heightAt(air, t + (airEnd * k) / 12)] as const)
+          css.push(`@keyframes ghop${i}{${frames.map(([at, y]) => `${n(at)}%{transform:translateY(${n(-y)}px)}`).join('')}}`)
+          hop = ` style="animation:ghop${i} ${n(airEnd)}ms linear forwards"`
+        }
+        const upTo = Math.max(0, airEnd)
+        poses =
+          (run.air !== null ? `<g ${during(0, airEnd)}><use href="#cAir"/></g>` : '') +
+          (slideEnd > upTo ? `<g ${during(upTo, slideEnd)}><use href="#cSlide" y="10"/></g>` : '') +
+          `<g ${during(Math.max(upTo, slideEnd, 0), Infinity)}><use class="la" href="#cRunA"/><use class="lb" href="#cRunB"/></g>`
+      }
+      return `<g class="ghost" transform="translate(${ghostX(i)} ${GROUND - CLAWD_H})" shape-rendering="crispEdges"><g${hop}>${poses}</g></g>${tag}`
+    })
+    .join('')
+}
+
+// Caught ghosts lie where they fell, and the world carries them off.
+function fallenGhosts(g: Game, d: number) {
+  return g.ghosts
+    .map((ghost, i) => {
+      if (ghost.game.mode !== 'over') return ''
+      const x = ghostX(i) + distAt(ghost.game.gameAt) - d
+      return x < -60 ? '' : `<g class="ghost" transform="translate(${n(x)} ${GROUND - CLAWD_H})" shape-rendering="crispEdges"><use href="#cDead"/></g>`
+    })
+    .join('')
 }
 
 // A new level, called out mid-band.
@@ -852,7 +1033,7 @@ function card(g: Game, view: View, width: number, now: number) {
   if (g.mode === 'ready') {
     title = 'BUG DASH'
     line = '✕ jump · ○ slide · □ dash · Options pause'
-    foot = `Best ${g.best} · no pad? Play, then w s d p`
+    foot = view.race ? standing(view.race) : `Best ${g.best} · no pad? Play, then w s d p · /bugdash join <name> to race`
   } else if (g.mode === 'paused') {
     title = 'PAUSED'
     line = PAUSE_TEXT[g.why]
@@ -860,7 +1041,7 @@ function card(g: Game, view: View, width: number, now: number) {
   } else {
     title = g.crash?.kind === 'fail' ? 'TESTS FAILED' : 'SQUASHED BY A BUG'
     line = g.isNewBest ? `New best · ${g.score} pts` : `${g.score} pts · best ${g.best}`
-    foot = `Reached level ${g.level + 1} · ✕ to run again`
+    foot = `${sentText(view.race) ?? `Reached level ${g.level + 1}`} · ✕ to run again`
   }
   const age = g.crash === null ? 0 : now - g.crash.wall
   const flash = g.mode === 'over' ? `<rect width="${width}" height="${HEIGHT}" fill="#F0565B" style="opacity:0;animation:flash 450ms ease-out -${n(age)}ms"/>` : ''
@@ -874,16 +1055,37 @@ function card(g: Game, view: View, width: number, now: number) {
   )
 }
 
+// The 3, 2, 1 after a resume, over a world standing still.
+function countdown(g: Game, width: number, now: number) {
+  const left = g.countdownUntil - now
+  if (g.mode !== 'running' || left <= 0) return ''
+  const beat = COUNTDOWN_MS / 3
+  return [3, 2, 1]
+    .map((digit, i) => {
+      const from = i * beat - (COUNTDOWN_MS - left)
+      if (from + beat <= 0) return ''
+      return (
+        `<g ${during(from, from + beat)}><text class="up" x="${n(width / 2)}" y="60" font-size="30" font-weight="800" text-anchor="middle" stroke-width="4" paint-order="stroke" ${FONT}` +
+        ` style="transform-box:fill-box;transform-origin:center;animation:count ${n(beat)}ms ease-out ${n(from)}ms both">${digit}</text></g>`
+      )
+    })
+    .join('')
+}
+
 // The run as it is at `now`, an SVG the band draws as an image.
 export function drawScene(g: Game, view: View, now: number): string {
   const width = Math.round(view.width)
   const t = gameTime(g, now)
   const d = distAt(t)
-  const live = g.mode === 'running'
+  const live = g.mode === 'running' && now >= g.countdownUntil
   const speed = speedAt(t)
   const css: string[] = []
   const scene =
-    backdrop(width, d, speed, live, css) + world(g, width, d, speed, live, css) + runner(g, t, now, live, css) + pops(g, now, width)
+    backdrop(width, d, speed, live, css) +
+    world(g, width, d, speed, live, css) +
+    ghostRunners(g, t, live, css) +
+    runner(g, t, now, live, css) +
+    pops(g, now, width)
   const shake = g.mode === 'over' && g.crash !== null ? ` style="animation:shake 320ms linear -${n(now - g.crash.wall)}ms"` : ''
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${HEIGHT}" viewBox="0 0 ${width} ${HEIGHT}">` +
@@ -891,7 +1093,7 @@ export function drawScene(g: Game, view: View, now: number): string {
     `<mask id="bands" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${HEIGHT}"><rect width="${width}" height="${HEIGHT}" fill="#fff"/>` +
     `<rect y="${GROUND - 15}" width="${width}" height="2" fill="#000"/><rect y="${GROUND - 10}" width="${width}" height="2.5" fill="#000"/><rect y="${GROUND - 5}" width="${width}" height="3" fill="#000"/></mask></defs>` +
     `<style>${CSS}${live ? LIVE_CSS : ''}${css.join('')}</style>` +
-    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${card(g, view, width, now)}</g>` +
+    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${countdown(g, width, now)}${card(g, view, width, now)}</g>` +
     `<rect class="frame" x=".5" y=".5" width="${width - 1}" height="${HEIGHT - 1}" rx="9.5"/></svg>`
   )
 }

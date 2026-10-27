@@ -6,3 +6,6 @@ PadCoder.app/
 
 # Types the Claude Code engine writes into a loaded mod
 mods/*/.claude-plugin/types/
+
+# Local state of the race server under `wrangler dev`
+.wrangler/
