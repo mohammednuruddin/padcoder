@@ -120,6 +120,14 @@ test('hiding the run the pad plays hands the pad back, and a hidden run ignores 
   await pad('jump')
   await $.command.run(BUGDASH)
   expect(await alt()).toMatch(/paused/)
+
+  // Shown with /bugdash in a session that missed game.on: once the pad
+  // plays it, hiding it hands the pad back too.
+  posted.length = 0
+  await pad('jump')
+  expect(await alt()).toMatch(/running/)
+  await $.command.run(BUGDASH)
+  expect(posted).toContain('com.padcoder.game.hidden')
   await pad('end')
   await ui.unmount()
 })

@@ -91,7 +91,11 @@ async function listen($: EngineInterface) {
       pending = lines.pop() ?? ''
       for (const line of lines) {
         const signal = SIGNALS[line.trim()]
-        if (signal !== undefined) await handle($, signal)
+        if (signal === undefined) continue
+        // A move means the pad plays a shown run, even in a session that
+        // started after game.on.
+        if (signal !== 'on' && signal !== 'off' && (await read($, shown))) padPlays = true
+        await handle($, signal)
       }
     }
   } catch {
