@@ -68,6 +68,62 @@ test('the terminal has no SVG, so the band is left to the rest', async ($, on) =
   await ui.unmount()
 })
 
+test('hiding the run the pad plays hands the pad back, and a hidden run ignores the pad', async ($, on) => {
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'bugdash' } }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="core" />
+  })
+  mock.store(on)
+  const clock = mock.clock(on)
+  // notifyutil: what the mod posts, and a listener the test feeds lines to.
+  const posted: string[] = []
+  on('process.run', (_, e) => {
+    posted.push(e.argv.at(-1) ?? '')
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const lines: string[] = []
+  let wakeListener = () => {}
+  on('process.spawn', async function* () {
+    for (;;) {
+      for (let line = lines.shift(); line !== undefined; line = lines.shift()) {
+        if (line === 'end') return { value: { code: 0, signal: null } }
+        yield { stream: 'stdout' as const, text: `com.padcoder.game.${line}\n` }
+      }
+      await new Promise<void>(resolve => (wakeListener = resolve))
+    }
+  })
+  const pad = async (move: string) => {
+    lines.push(move)
+    wakeListener()
+    await clock.advance(1)
+  }
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const alt = async () => (await ui.find({ type: 'Svg' }))?.props.alt
+
+  // Shown and hidden with /bugdash alone: the pad stays where it was.
+  await $.command.run(BUGDASH)
+  await $.command.run(BUGDASH)
+  expect(posted).not.toContain('com.padcoder.game.hidden')
+
+  // L1 + touchpad shows it and ✕ runs it; hiding it hands the pad back.
+  await pad('on')
+  await pad('jump')
+  expect(await alt()).toMatch(/running/)
+  await $.command.run(BUGDASH)
+  expect(posted).toContain('com.padcoder.game.hidden')
+
+  // ✕ while it is hidden doesn't run it on out of sight.
+  await pad('jump')
+  await $.command.run(BUGDASH)
+  expect(await alt()).toMatch(/paused/)
+  await pad('end')
+  await ui.unmount()
+})
+
 // Clawd's body spans these screen columns; a bot reads the course ahead of it.
 const CLAWD_BACK = 114
 const CLAWD_FRONT = 146

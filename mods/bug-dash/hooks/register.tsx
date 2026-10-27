@@ -28,6 +28,8 @@ const shown = atom({ plugin: 'bug-dash', key: 'shown' } as const, false)
 const game = newGame()
 let timer: Timer | undefined
 let lastCrash = game.crash
+// Whether the pad plays this session's run: from game.on to game.off.
+let padPlays = false
 
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
@@ -56,14 +58,21 @@ async function handle($: EngineInterface, signal: Signal) {
   let changed = false
   if (signal === 'on' || signal === 'show') {
     await update($, shown, () => true)
-    if (signal === 'on' && game.mode === 'paused') changed = act(game, 'jump', now)
+    if (signal === 'on') {
+      padPlays = true
+      if (game.mode === 'paused') changed = act(game, 'jump', now)
+    }
   } else if (signal === 'off' || signal === 'hide') {
     changed = pause(game, now, signal === 'off' ? 'pad' : 'hidden')
     if (signal === 'hide') {
       await update($, shown, () => false)
-      post($, HIDDEN)
+      // Hiding the run the pad plays hands the pad back to Claude, which
+      // pauses the copies in other sessions too; a run shown with /bugdash
+      // alone leaves the pad be.
+      if (padPlays) post($, HIDDEN)
     }
-  } else changed = act(game, signal, now)
+    padPlays = false
+  } else if (await read($, shown)) changed = act(game, signal, now)
   if (changed) redraw($)
   await settle($)
 }

@@ -127,7 +127,8 @@ desktop app included.
 
 The game draws in the desktop app; a terminal has no SVG, so there the band is left as it was. Every
 open session runs its own copy, so L1 + Touchpad starts the game in each of them: keep one Claude window
-open while you play. The mod's source is in [`mods/bug-dash`](mods/bug-dash).
+open while you play. Hiding the game the pad plays hands the pad back to Claude in all of them; one
+shown with `/bugdash` alone leaves the pad as it was. The mod's source is in [`mods/bug-dash`](mods/bug-dash).
 
 ## Power use
 PadCoder is built to cost nothing while you aren't using it:
