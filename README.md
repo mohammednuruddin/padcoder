@@ -116,8 +116,9 @@ grabbing ✦ tokens.
 Everyone runs the same course each day (UTC), and you can race it online:
 
 - `/bugdash join <name>` takes a name. From then on, each run is sent when Clawd is caught. The race
-  server plays it again from your moves with the game's own rules, so only scores really played count,
-  and keeps your best of the day.
+  server plays it again from your moves with the game's own rules, so a score has to be one those moves
+  really make on the course, and keeps your best of the day. A copy of another player's top run, even
+  nudged a few milliseconds, is refused.
 - The ready card shows who leads today and where you stand; the game-over card shows your rank.
 - Two ghosts run with you: the day's leader and your own best, pale Clawds just behind yours, with
   their names and scores on the ground beneath.

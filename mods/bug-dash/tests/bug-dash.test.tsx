@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { LIMIT_MS, RULES_VERSION, act, advance, dayOf, daySeed, distAt, gameTime, multiplier, newGame, nextWake, replay, speedAt, type Game, type Move } from '../hooks/scene'
+import { LIMIT_MS, RULES_VERSION, act, advance, dayOf, daySeed, distAt, gameTime, multiplier, newGame, nextWake, replay, setGhosts, speedAt, type Game, type Move } from '../hooks/scene'
 
 const BAND = {
   plugin: 'bug-dash',
@@ -180,6 +180,10 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
   // band's buttons as the bot plays today's course for 40 s, then left.
   const said = await $.command.run({ ...BUGDASH, args: 'join ada' })
   expect(JSON.stringify(said)).toMatch(/in the daily race as ada/)
+  // Caught without a single move: still a run, and sent.
+  await ui.press({ key: 'play' })
+  await clock.advance(15_000)
+  expect(asked.filter(a => a === 'POST /run')).toHaveLength(1)
   const plan = play(daySeed(dayOf(clock.now())), 40_000).g.log
   await ui.press({ key: 'play' })
   const started = clock.now()
@@ -251,9 +255,20 @@ test('a run plays again exactly from its seed and its moves, however unevenly it
     if (g.mode === 'over') caught++
     expect(g.log.length).toBeGreaterThan(40)
     const again = replay(seed, g.log, g.mode === 'over' ? 3_600_000 : g.simAt)
-    expect([again.mode, again.score, again.simAt, again.level]).toEqual([g.mode, g.score, g.simAt, g.level])
+    expect([again.mode, again.score, again.simAt, again.level, again.log.length]).toEqual([g.mode, g.score, g.simAt, g.level, g.log.length])
   }
   expect(caught).toBeGreaterThan(0)
+})
+
+test("ghosts of another day's course wait for the next run", () => {
+  const g = newGame()
+  g.seed = daySeed('2026-10-27')
+  act(g, 'jump', 0)
+  const tomorrow = daySeed('2026-10-28')
+  expect(setGhosts(g, tomorrow, [{ name: 'ada', score: 0, moves: [] }])).toBe(false)
+  expect(g.ghosts).toHaveLength(0)
+  expect(setGhosts(g, g.seed, [{ name: 'ada', score: 0, moves: [] }])).toBe(true)
+  expect(g.ghosts).toHaveLength(1)
 })
 
 test('a resume counts 3, 2, 1 with the world still, and buys no safety', () => {

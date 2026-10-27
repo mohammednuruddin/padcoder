@@ -320,9 +320,9 @@ function start(g: Game, now: number) {
 
 // Ghosts: other runs of the same course, played again from their moves in
 // step with the player's game time.
-export function setGhosts(g: Game, seed: number, runs: readonly GhostRun[]) {
-  // Mid-run on another day's course, they wait for the next run.
-  if ((g.mode === 'running' || g.mode === 'paused') && seed !== g.seed) return
+// False when they can't join yet: mid-run on another day's course.
+export function setGhosts(g: Game, seed: number, runs: readonly GhostRun[]): boolean {
+  if ((g.mode === 'running' || g.mode === 'paused') && seed !== g.seed) return false
   g.ghosts = runs.slice(0, GHOSTS).map(run => {
     const ghost = { ...run, seed, endsAt: replay(seed, run.moves, LIMIT_MS).gameAt, game: newGame(), next: 0 }
     setOff(ghost)
@@ -330,6 +330,7 @@ export function setGhosts(g: Game, seed: number, runs: readonly GhostRun[]) {
     if (g.mode !== 'ready' && seed === g.seed) follow(ghost, g.simAt)
     return ghost
   })
+  return true
 }
 
 function setOff(ghost: Ghost) {
@@ -547,14 +548,16 @@ function move(g: Game, action: Move[1], t: number, now: number): boolean {
 }
 
 // A run played again from its seed and moves, as the server checks one: on
-// to the crash, or to `limit` ms of game time. Moves out of order end it.
+// to the crash, or to `limit` ms of game time. Its log holds the moves that
+// took, as a run logs them, so a log sent back whole had no idle moves and
+// none after the crash. Moves out of order end it.
 export function replay(seed: number, log: readonly Move[], limit: number): Game {
   const g = newGame()
   g.seed = seed
   start(g, 0)
   for (const [t, action] of log) {
     if (!(t >= g.simAt && t <= limit) || runTo(g, t, t) === 'over') break
-    move(g, action, t, t)
+    if (move(g, action, t, t)) g.log.push([t, action])
   }
   runTo(g, limit, limit)
   return g

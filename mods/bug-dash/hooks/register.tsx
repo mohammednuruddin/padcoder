@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
 import { SERVER, asked, boardOf, boardPath, joined, runBody, sentOf, type Answer, type Player } from './race'
-import { act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type PauseReason, type Race } from './scene'
+import { act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race } from './scene'
 
 type Signal = Action | 'on' | 'off' | 'show' | 'hide'
 
@@ -48,9 +48,10 @@ async function settle($: EngineInterface) {
   timer = undefined
   if (game.crash !== null && game.crash !== lastCrash) {
     lastCrash = game.crash
+    // Taken before anything awaits, so a quick restart can't swap the run.
+    if (player !== undefined) void submit($, player, { day: runDay, moves: game.log.slice(), score: game.score })
     post($, THUD)
     if (game.isNewBest) await $.store.set('best', game.best)
-    if (player !== undefined && game.log.length > 0) void submit($, player)
   }
   const wait = nextWake(game, await $.clock.now())
   if (wait !== undefined) timer = $.clock.after(wait, () => void wake($))
@@ -69,11 +70,11 @@ async function call($: EngineInterface, path: string, body?: unknown): Promise<A
   }
 }
 
-// Sends the run just ended, then fetches the board it changed.
-async function submit($: EngineInterface, who: Player) {
+// Sends a run just ended, then fetches the board it changed.
+async function submit($: EngineInterface, who: Player, run: { readonly day: string; readonly moves: readonly Move[]; readonly score: number }) {
   race = { ...(race ?? { top: [], total: 0 }), sent: 'sending' }
   redraw($)
-  const sent = sentOf(await call($, '/run', runBody(who, runDay, game.log.slice(), game.score)))
+  const sent = sentOf(await call($, '/run', runBody(who, run.day, run.moves, run.score)))
   if (race !== undefined) race = { ...race, sent }
   redraw($)
   await refresh($)
@@ -88,9 +89,9 @@ async function refresh($: EngineInterface) {
   if (fresh === undefined || player === undefined) return
   const { ghosts, ...standing } = fresh
   race = { ...standing, sent: race?.sent }
-  raceDay = day
   raceAt = now
-  setGhosts(game, daySeed(day), ghosts)
+  // Mid-run on yesterday's course, today's ghosts wait: the next run fetches again.
+  if (setGhosts(game, daySeed(day), ghosts)) raceDay = day
   redraw($)
 }
 
