@@ -123,8 +123,9 @@ Everyone runs the same course each day (UTC), and you can race it online:
 - Two ghosts run with you: the day's leader and your own best, pale Clawds just behind yours, with
   their names and scores on the ground beneath.
 - `/bugdash top` lists today's top ten. `/bugdash leave` stops sending runs; your name stays taken.
-- What is sent: your name, and each run's moves and score. Nothing about Claude or your work. Until
-  you join, the mod sends nothing, except the request for the board when you run `/bugdash top`.
+- What is sent, to `bug-dash.nurusterling.workers.dev`: your name, and each run's moves and score.
+  Nothing about Claude or your work. Until you join, the mod sends nothing, except the request for the
+  board when you run `/bugdash top`.
 
 ### Install Bug Dash
 At the prompt of a Claude Code terminal session:

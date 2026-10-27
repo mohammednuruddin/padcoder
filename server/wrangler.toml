@@ -6,5 +6,5 @@ compatibility_date = "2026-09-20"
 [[d1_databases]]
 binding = "DB"
 database_name = "bug-dash"
-# Replaced with the id `wrangler d1 create bug-dash` prints.
-database_id = "00000000-0000-0000-0000-000000000000"
+# The id `wrangler d1 create bug-dash` printed; to host your own, put yours here.
+database_id = "2e406196-f651-400d-b0a9-cbd0efb169d9"

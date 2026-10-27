@@ -4,8 +4,8 @@
 
 import { RULES_VERSION, type GhostRun, type Move, type Race } from './scene'
 
-// The race server; empty until it's deployed, when the race is off.
-export const SERVER = ''
+// The race server, server/ in this repository; empty turns the race off.
+export const SERVER = 'https://bug-dash.nurusterling.workers.dev'
 
 export type Player = { readonly name: string; readonly token: string }
 export type Board = Omit<Race, 'sent'> & { readonly ghosts: readonly GhostRun[] }
