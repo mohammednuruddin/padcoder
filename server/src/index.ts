@@ -17,11 +17,14 @@ const LIMIT_MS = 20 * 60_000 // runs longer than this aren't ranked
 const MAX_MOVES = 20_000
 const MAX_BODY = 600_000
 const MAX_TRIES = 300 // runs a player may send in a day
-// Two players' runs this long don't share this much of their moves, each
-// within a few milliseconds, by chance; a copy, even nudged, does.
-const OWN_MOVES = 20
+// One player's run doesn't hold this much of another's moves, each within a
+// few milliseconds, by chance; a copy does, nudged or padded with more. A
+// shorter run is a copy only move for move; a run of a move or two is worth
+// too little to tell.
+const LONG_RUN = 20
 const COPIED = 0.8
 const NEAR_MS = 8
+const SHORT_RUN = 3
 const TOP = 10
 const NAME = /^[A-Za-z0-9_-]{2,16}$/
 const DAY = /^\d{4}-\d{2}-\d{2}$/
@@ -116,13 +119,16 @@ async function run(request: Request, env: Env) {
   if (g.mode !== 'over') throw new Refusal(422, 'Runs over 20 minutes are not ranked.')
   // A run logs only moves that take, and none after the crash.
   if (g.log.length !== moves.length) throw new Refusal(400, 'Those moves make no run.')
-  if (moves.length >= OWN_MOVES) {
-    const others = await env.DB.prepare('SELECT name, moves FROM runs WHERE day = ? AND rules = ? AND key != ? ORDER BY score DESC, at ASC LIMIT ?')
-      .bind(day, RULES_VERSION, key, TOP)
-      .all<{ name: string; moves: string }>()
-    for (const other of others.results) {
-      if (shared(moves, JSON.parse(other.moves) as Move[]) >= moves.length * COPIED) throw new Refusal(409, `That run is ${other.name}'s.`)
-    }
+  const others = await env.DB.prepare('SELECT name, moves FROM runs WHERE day = ? AND rules = ? AND key != ? ORDER BY score DESC, at ASC LIMIT ?')
+    .bind(day, RULES_VERSION, key, TOP)
+    .all<{ name: string; moves: string }>()
+  for (const other of others.results) {
+    const theirs = JSON.parse(other.moves) as Move[]
+    const copied =
+      theirs.length >= LONG_RUN
+        ? held(theirs, moves, NEAR_MS) >= theirs.length * COPIED
+        : theirs.length >= SHORT_RUN && held(theirs, moves, 0) === theirs.length
+    if (copied) throw new Refusal(409, `That run is ${other.name}'s.`)
   }
   await env.DB.prepare(
     `INSERT INTO runs (day, rules, key, name, score, level, moves, at, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -149,16 +155,16 @@ async function run(request: Request, env: Env) {
   })
 }
 
-// How many of `mine` have a move of the same kind in `theirs` within NEAR_MS;
-// both are in time order.
-function shared(mine: readonly Move[], theirs: readonly Move[]) {
+// How many of `theirs` have a move of the same kind in `mine` within
+// `near` ms; both are in time order.
+function held(theirs: readonly Move[], mine: readonly Move[], near: number) {
   let count = 0
   let from = 0
-  for (const [t, action] of mine) {
-    while (from < theirs.length && (theirs[from]?.[0] ?? Infinity) < t - NEAR_MS) from++
-    for (let i = from; i < theirs.length; i++) {
-      const [u, other] = theirs[i] ?? [Infinity, action]
-      if (u > t + NEAR_MS) break
+  for (const [t, action] of theirs) {
+    while (from < mine.length && (mine[from]?.[0] ?? Infinity) < t - near) from++
+    for (let i = from; i < mine.length; i++) {
+      const [u, other] = mine[i] ?? [Infinity, action]
+      if (u > t + near) break
       if (other === action) {
         count++
         break
