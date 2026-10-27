@@ -33,14 +33,21 @@ const GRACE_MS = 900
 const REGEN = 1 / 6500 // dash charges a millisecond
 const CHARGES = 3
 
+// Every level the world speeds up, the long gaps close in and harder
+// patterns come in, until the last level, six minutes in.
 const BASE_SPEED = 0.26 // px/ms
-const SPEED_STEP = 0.018
-const MAX_SPEED = 0.5
+const TOP_SPEED = 0.66 // what the speed closes in on
+const RAMP = 0.92 // the share of the climb still to go after each level
 const LEVEL_MS = 9000
+const LAST_LEVEL = 40
+const GAP_MS = 560 // the shortest gap: a whole jump
+const SPREAD_MS = 820 // how much longer a gap may be at first
+const LAST_SPREAD_MS = 280 // and at the last level
 
 const STEP_MS = 4
 const WORLD_MS = 20000 // how long one drawing's scroll runs on
 const POP_MS = 750
+const LEVEL_POP_MS = 1400
 const POINTS = { pass: 10, token: 25, smash: 15 } as const
 
 export type Action = 'jump' | 'slide' | 'dash' | 'pause'
@@ -50,7 +57,8 @@ type Kind = 'bug' | 'fail' | 'token'
 
 type Thing = { readonly id: number; readonly kind: Kind; readonly x: number; readonly h: number; done?: 'passed' | 'taken' | 'smashed' | 'missed' }
 type Air = { readonly at: number; readonly h: number; readonly v: number }
-type Pop = { readonly kind: 'token' | 'smash' | 'double'; readonly y: number; readonly wall: number }
+// `value` is the points scored, or the level reached.
+type Pop = { readonly kind: 'token' | 'smash' | 'double' | 'level'; readonly y: number; readonly wall: number; readonly value: number }
 
 export type Game = {
   mode: Mode
@@ -95,22 +103,28 @@ export const gameTime = (g: Game, now: number) => (g.mode === 'running' ? g.game
 // ------------------------------------------------------------------ motion
 
 const levelAt = (t: number) => Math.max(0, Math.floor(t / LEVEL_MS))
-const speedOf = (level: number) => Math.min(MAX_SPEED, BASE_SPEED + SPEED_STEP * level)
+const speedOf = (level: number) => TOP_SPEED - (TOP_SPEED - BASE_SPEED) * RAMP ** Math.min(level, LAST_LEVEL)
+export const speedAt = (t: number) => speedOf(levelAt(t))
+// Points count for more the longer the run lasts.
+export const multiplier = (level: number) => 1 + Math.floor(level / 4)
+
+// How far the world has scrolled when each level starts, up to the last.
+const LEVEL_DIST = Array.from({ length: LAST_LEVEL + 1 }, (_, level) => {
+  let d = 0
+  for (let l = 0; l < level; l++) d += speedOf(l) * LEVEL_MS
+  return d
+})
 
 // How far the world has scrolled by game time `t`, and the inverse.
 export function distAt(t: number): number {
-  const level = levelAt(t)
-  let d = 0
-  for (let l = 0; l < level; l++) d += speedOf(l) * LEVEL_MS
-  return d + speedOf(level) * (t - level * LEVEL_MS)
+  const level = Math.min(levelAt(t), LAST_LEVEL)
+  return (LEVEL_DIST[level] ?? 0) + speedOf(level) * (t - level * LEVEL_MS)
 }
 
 function timeAtDist(d: number): number {
-  for (let l = 0, done = 0; ; l++) {
-    const span = speedOf(l) * LEVEL_MS
-    if (done + span >= d) return l * LEVEL_MS + (d - done) / speedOf(l)
-    done += span
-  }
+  let level = 0
+  while (level < LAST_LEVEL && (LEVEL_DIST[level + 1] ?? Infinity) <= d) level++
+  return level * LEVEL_MS + (d - (LEVEL_DIST[level] ?? 0)) / speedOf(level)
 }
 
 const heightAt = (air: Air | null, t: number) => {
@@ -155,30 +169,95 @@ function place(g: Game, kind: Kind, x: number, h = 0) {
   return x + BOX[kind].w
 }
 
-// Lays the course out ahead of Clawd: gaps grow with the speed, so every
-// pattern stays clearable, and pairs of bugs wait for the second level.
-function generate(g: Game, upTo: number) {
-  while (g.aheadTo < upTo) {
-    const speed = speedOf(levelAt(timeAtDist(g.aheadTo)))
-    const x = g.aheadTo + speed * (560 + random(g) * 820) + 30
-    const roll = random(g)
-    if (roll < 0.3) g.aheadTo = place(g, 'bug', x)
-    else if (roll < 0.42 && levelAt(timeAtDist(x)) >= 1) {
-      place(g, 'bug', x)
-      g.aheadTo = place(g, 'bug', x + 30)
-    } else if (roll < 0.66) {
-      g.aheadTo = place(g, 'fail', x)
+// A stretch of course laid from `x` at `speed`; returns where it ends.
+type Lay = (g: Game, x: number, speed: number) => number
+
+const layBug: Lay = (g, x) => place(g, 'bug', x)
+
+// Each pattern: the level it first comes up at, and how often it comes up
+// at the first level and at the last. The parts of a combo are spaced in
+// time, so each can be cleared in turn at any speed.
+const PATTERNS: readonly { readonly from: number; readonly first: number; readonly last: number; readonly lay: Lay }[] = [
+  { from: 0, first: 30, last: 10, lay: layBug },
+  {
+    from: 0, first: 24, last: 10,
+    lay: (g, x) => {
+      const end = place(g, 'fail', x)
       if (random(g) < 0.5) place(g, 'token', x + 15, 2)
-    } else if (roll < 0.84) {
+      return end
+    },
+  },
+  {
+    from: 0, first: 18, last: 6,
+    lay: (g, x) => {
       place(g, 'token', x - 26, 24)
       place(g, 'token', x + 5, 40)
       place(g, 'token', x + 36, 24)
-      g.aheadTo = place(g, 'bug', x)
-    } else if (roll < 0.93) {
-      for (let i = 0; i < 4; i++) g.aheadTo = place(g, 'token', x + i * 22, 2)
-    } else {
-      for (let i = 0; i < 3; i++) g.aheadTo = place(g, 'token', x + i * 22, 30)
-    }
+      return place(g, 'bug', x)
+    },
+  },
+  {
+    from: 0, first: 9, last: 3,
+    lay: (g, x) => {
+      for (let i = 0; i < 3; i++) place(g, 'token', x + i * 22, 2)
+      return place(g, 'token', x + 66, 2)
+    },
+  },
+  {
+    from: 0, first: 7, last: 2,
+    lay: (g, x) => {
+      for (let i = 0; i < 2; i++) place(g, 'token', x + i * 22, 30)
+      return place(g, 'token', x + 44, 30)
+    },
+  },
+  {
+    from: 1, first: 12, last: 12,
+    lay: (g, x) => {
+      place(g, 'bug', x)
+      return place(g, 'bug', x + 30)
+    },
+  },
+  // A bug, then a banner: land and slide, or dive under it.
+  { from: 3, first: 10, last: 14, lay: (g, x, speed) => place(g, 'fail', place(g, 'bug', x) + speed * 640) },
+  // A banner, then a bug: slide, then jump.
+  { from: 5, first: 10, last: 14, lay: (g, x, speed) => place(g, 'bug', place(g, 'fail', x) + speed * 600) },
+  // Three bugs in a row: one long jump, or a double.
+  {
+    from: 8, first: 8, last: 12,
+    lay: (g, x) => {
+      place(g, 'bug', x)
+      place(g, 'bug', x + 30)
+      return place(g, 'bug', x + 60)
+    },
+  },
+  // Two banners: one long slide, with a token between them.
+  {
+    from: 11, first: 8, last: 10,
+    lay: (g, x) => {
+      place(g, 'fail', x)
+      place(g, 'token', x + 49, 2)
+      return place(g, 'fail', x + 56)
+    },
+  },
+]
+
+function pick(g: Game, level: number): Lay {
+  const k = level / LAST_LEVEL
+  const open = PATTERNS.filter(p => level >= p.from).map(p => ({ lay: p.lay, weight: p.first + (p.last - p.first) * k }))
+  let roll = random(g) * open.reduce((sum, p) => sum + p.weight, 0)
+  return open.find(p => (roll -= p.weight) < 0)?.lay ?? layBug
+}
+
+// Lays the course out ahead of Clawd. Gaps are timed, so they grow with the
+// speed and every pattern stays clearable; the long ones close in level by
+// level.
+function generate(g: Game, upTo: number) {
+  while (g.aheadTo < upTo) {
+    const level = Math.min(LAST_LEVEL, levelAt(timeAtDist(g.aheadTo)))
+    const speed = speedOf(level)
+    const spread = LAST_SPREAD_MS + (SPREAD_MS - LAST_SPREAD_MS) * RAMP ** level
+    const x = g.aheadTo + speed * (GAP_MS + random(g) * spread) + 30
+    g.aheadTo = pick(g, level)(g, x, speed)
   }
   g.things.sort((a, b) => a.x - b.x)
 }
@@ -199,9 +278,12 @@ function crash(g: Game, kind: Kind, t: number, wall: number) {
   g.mode = 'over'
   g.gameAt = t
   g.simAt = t
+  g.level = levelAt(t)
   g.isNewBest = g.score > g.best
   g.best = Math.max(g.best, g.score)
 }
+
+const lifetime = (pop: Pop) => (pop.kind === 'level' ? LEVEL_POP_MS : POP_MS)
 
 // Runs the world on to `now`, a few milliseconds at a time: tokens taken,
 // bugs smashed or passed, or Clawd caught. 'none' when nothing shows it.
@@ -213,6 +295,7 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
   for (let t = g.simAt; t < end; ) {
     t = Math.min(end, t + STEP_MS)
     const d = distAt(t)
+    const times = multiplier(levelAt(t))
     if (g.air !== null && t >= landTime(g.air)) {
       g.air = null
       g.jumps = 0
@@ -221,7 +304,7 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
       if (thing.done !== undefined) continue
       if (thing.x - d + BOX[thing.kind].r <= RUN_L) {
         thing.done = thing.kind === 'token' ? 'missed' : 'passed'
-        if (thing.kind !== 'token') g.score += POINTS.pass
+        if (thing.kind !== 'token') g.score += POINTS.pass * times
         changed ||= thing.kind !== 'token'
         continue
       }
@@ -229,13 +312,13 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
       const wall = now - (end - t)
       if (thing.kind === 'token') {
         thing.done = 'taken'
-        g.score += POINTS.token
-        g.pops.push({ kind: 'token', y: heightAt(g.air, t), wall })
+        g.score += POINTS.token * times
+        g.pops.push({ kind: 'token', y: heightAt(g.air, t), wall, value: POINTS.token * times })
         changed = true
       } else if (t < g.dashUntil) {
         thing.done = 'smashed'
-        g.score += POINTS.smash
-        g.pops.push({ kind: 'smash', y: 0, wall })
+        g.score += POINTS.smash * times
+        g.pops.push({ kind: 'smash', y: 0, wall, value: POINTS.smash * times })
         changed = true
       } else if (t >= g.graceUntil) {
         crash(g, thing.kind, t, wall)
@@ -245,13 +328,14 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
   }
   g.simAt = end
   const d = distAt(end)
+  const level = levelAt(end)
+  if (level > g.level) g.pops.push({ kind: 'level', y: 0, wall: now - (end - level * LEVEL_MS), value: level })
   g.things = g.things.filter(thing => thing.x - d > -80)
-  g.pops = g.pops.filter(pop => now - pop.wall < POP_MS)
+  g.pops = g.pops.filter(pop => now - pop.wall < lifetime(pop))
   if (g.aheadTo < d + g.width * 2) {
     generate(g, d + g.width * 3)
     changed = true
   }
-  const level = levelAt(end)
   const charges = Math.floor(energyAt(g, end))
   if (level !== g.level || charges !== g.charges) changed = true
   g.level = level
@@ -260,8 +344,8 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
 }
 
 // When the run can next change, in wall milliseconds from `now`: a thing
-// reaching Clawd, Clawd touching one as things stand, the world speeding up,
-// a dash charge filling, the course needing more laid out.
+// reaching Clawd, Clawd touching one as things stand, the next level, a dash
+// charge filling, the course needing more laid out.
 export function nextWake(g: Game, now: number): number | undefined {
   if (g.mode !== 'running') return undefined
   const t = gameTime(g, now)
@@ -284,7 +368,7 @@ export function nextWake(g: Game, now: number): number | undefined {
     }
     next = Math.min(next, at)
   }
-  if (speedOf(levelAt(t)) < MAX_SPEED) next = Math.min(next, (levelAt(t) + 1) * LEVEL_MS)
+  next = Math.min(next, (levelAt(t) + 1) * LEVEL_MS)
   const e = energyAt(g, t)
   if (e < CHARGES) next = Math.min(next, t + (Math.floor(e) + 1 - e) / REGEN)
   next = Math.min(next, timeAtDist(g.aheadTo - g.width * 2))
@@ -337,7 +421,7 @@ export function act(g: Game, action: Action, now: number): boolean {
     const h = heightAt(g.air, t)
     g.air = { at: t, h, v: Math.min(DOUBLE_V, Math.sqrt(2 * GRAVITY * Math.max(0, CEILING - h))) }
     g.jumps = 2
-    g.pops.push({ kind: 'double', y: h, wall: now })
+    g.pops.push({ kind: 'double', y: h, wall: now, value: 0 })
     return true
   }
   if (action === 'slide') {
@@ -378,11 +462,11 @@ export function sceneAlt(g: Game, view: View): string {
     case 'ready':
       return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.`
     case 'running':
-      return `Bug Dash, running: ${g.score} points, best ${g.best}.${status ? ` ${status}.` : ''}`
+      return `Bug Dash, running: ${g.score} points, level ${g.level + 1}, best ${g.best}.${status ? ` ${status}.` : ''}`
     case 'paused':
-      return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, best ${g.best}.`
+      return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, level ${g.level + 1}, best ${g.best}.`
     case 'over':
-      return `Bug Dash, over: ${g.crash?.kind === 'fail' ? 'tests failed' : 'squashed by a bug'} at ${g.score} points${g.isNewBest ? ', a new best' : `, best ${g.best}`}.`
+      return `Bug Dash, over: ${g.crash?.kind === 'fail' ? 'tests failed' : 'squashed by a bug'} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.`
   }
 }
 
@@ -532,11 +616,12 @@ const CSS = `
 .code{opacity:.2}.tile{fill:#3a2f33}.edge{fill:${CLAY}}.star{fill:#fff}.shade{fill:#000;opacity:.35}.rope{stroke:#8b7d75}
 .txt{fill:#f3ede7}.dim{fill:#a39a93}.chip{fill:#000;fill-opacity:.3}.card{fill:#17141a;fill-opacity:.9;stroke:#40363a}
 .veil{fill:#0c0a0e;opacity:.42}.frame{fill:none;stroke:#fff;stroke-opacity:.08}.pip{fill:${CLAY}}.pip0{fill:none;stroke:${CLAY};stroke-opacity:.6}
+.lv{fill:${CLAY}}.mul{fill:#f2bd63}.up{fill:#ffe2b6;stroke:#140f14;stroke-opacity:.55}
 @media (prefers-color-scheme: light){
 .sky{fill:url(#skyL)}.gnd{fill:url(#gndL)}.farB{fill:#eadfd2}.farA{fill:#e0d0c0}.lit{fill:#c58f6c;opacity:.35}
 .code{opacity:.32}.tile{fill:#d3bfab}.star{display:none}.shade{opacity:.13}.rope{stroke:#a8968a}
 .txt{fill:#2b2420}.dim{fill:#7d736b}.chip{fill:#fff;fill-opacity:.6}.card{fill:#fffaf4;fill-opacity:.95;stroke:#e3d5c6}
-.veil{fill:#fffaf4;opacity:.45}.frame{stroke:#000;stroke-opacity:.08}}
+.veil{fill:#fffaf4;opacity:.45}.frame{stroke:#000;stroke-opacity:.08}.mul{fill:#a8701c}.up{fill:#b5593c;stroke:#fffaf4;stroke-opacity:.85}}
 .lb{opacity:0}.spin{transform-box:fill-box;transform-origin:center}.swing{transform-box:fill-box;transform-origin:50% 0}
 .ring{transform-box:fill-box;transform-origin:center}
 @keyframes on{to{opacity:1}}@keyframes off{to{opacity:0}}
@@ -554,6 +639,8 @@ const CSS = `
 @keyframes dust{from{transform:translateX(0);opacity:.7}to{transform:translateX(-12px);opacity:0}}
 @keyframes zip{from{transform:translateX(0)}to{transform:translateX(-140px)}}
 @keyframes flicker{0%,49%{opacity:1}50%,100%{opacity:.25}}
+@keyframes lvl{0%{opacity:0;transform:translateY(5px)}14%,78%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(-6px)}}
+@keyframes glow{from{fill:#ffe2b6}}
 @keyframes intro{from{transform:translateY(6px);opacity:0}to{transform:translateY(0);opacity:1}}
 ${BURSTS}`
 
@@ -690,18 +777,32 @@ function runner(g: Game, t: number, now: number, live: boolean, css: string[]) {
   return `${shadow}${lines}<g transform="translate(${RX} ${top})" shape-rendering="crispEdges"><g${flicker}><g${hop}>${dash}${poses.join('')}</g></g></g>`
 }
 
-function pops(g: Game, now: number) {
+// A new level, called out mid-band.
+function levelUp(level: number, width: number, age: string) {
+  const faster = level <= LAST_LEVEL ? 'FASTER' : ''
+  const times = multiplier(level) > multiplier(level - 1) ? `×${multiplier(level)} POINTS` : ''
+  const sub = [faster, times].filter(Boolean).join(' · ')
+  return (
+    `<g ${FONT} text-anchor="middle" stroke-width="3" paint-order="stroke" style="opacity:0;animation:lvl ${LEVEL_POP_MS}ms ease-out ${age} both">` +
+    `<text class="up" x="${n(width / 2)}" y="46" font-size="14" font-weight="800" letter-spacing="3">LEVEL ${level + 1}</text>` +
+    (sub ? `<text class="up" x="${n(width / 2)}" y="58" font-size="8.5" font-weight="700" letter-spacing="1.5">${sub}</text>` : '') +
+    `</g>`
+  )
+}
+
+function pops(g: Game, now: number, width: number) {
   return g.pops
-    .filter(pop => now - pop.wall < POP_MS)
+    .filter(pop => now - pop.wall < lifetime(pop))
     .map(pop => {
       const age = `-${n(now - pop.wall)}ms`
+      if (pop.kind === 'level') return levelUp(pop.value, width, age)
       const x = RX + 27
       const y = GROUND - pop.y - CLAWD_H - 4
       if (pop.kind === 'double') {
         return `<g transform="translate(${x} ${n(GROUND - pop.y + 1)})"><ellipse class="ring" rx="12" ry="3" fill="none" stroke="#ffd2b8" stroke-width="1.5" style="animation:ring 380ms ease-out ${age} both"/></g>`
       }
       const color = pop.kind === 'token' ? '#ffd2b8' : '#ff8a8a'
-      const label = pop.kind === 'token' ? `+${POINTS.token}` : `+${POINTS.smash}`
+      const label = `+${pop.value}`
       return (
         `<g transform="translate(${x + (pop.kind === 'smash' ? 14 : 0)} ${n(y)})">` +
         Array.from({ length: 6 }, (_, i) => `<circle r="1.4" fill="${color}" style="animation:b${i} 460ms ease-out ${age} both"/>`).join('') +
@@ -711,12 +812,17 @@ function pops(g: Game, now: number) {
     .join('')
 }
 
-function hud(g: Game, view: View, width: number, t: number, live: boolean) {
+function hud(g: Game, view: View, width: number, t: number, now: number, live: boolean) {
   if (g.mode === 'ready') return ''
   const score = String(g.score)
   const chip = Math.max(86, 30 + score.length * 8)
   const charges = Math.floor(energyAt(g, t))
   const pips = Array.from({ length: CHARGES }, (_, i) => `<rect class="${i < charges ? 'pip' : 'pip0'}" x="${26 + i * 11}" y="35" width="8" height="3.5" rx="1.75"/>`).join('')
+  const up = g.pops.find(pop => pop.kind === 'level' && now - pop.wall < LEVEL_POP_MS)
+  const glow = up === undefined ? '' : ` style="animation:glow ${LEVEL_POP_MS}ms ease-out -${n(now - up.wall)}ms both"`
+  const level =
+    `<text x="26" y="49" font-size="8" font-weight="700" letter-spacing=".6"><tspan class="lv"${glow}>LV ${g.level + 1}</tspan>` +
+    `<tspan class="mul" dx="6">×${multiplier(g.level)}</tspan></text>`
   let status = ''
   if (live && view.claude !== 'idle') {
     const text = STATUS_TEXT[view.claude]
@@ -728,10 +834,10 @@ function hud(g: Game, view: View, width: number, t: number, live: boolean) {
       `<text x="18" y="11.6" font-size="9.5" class="txt" ${FONT}>${text}</text></g>`
   }
   return (
-    `<g ${FONT}><rect class="chip" x="7" y="6" width="${chip}" height="37" rx="9"/>` +
+    `<g ${FONT}><rect class="chip" x="7" y="6" width="${chip}" height="48" rx="9"/>` +
     `<g transform="translate(17 14.5) scale(.75)"><use href="#spark"/></g>` +
     `<text x="26" y="19" font-size="13" font-weight="700" class="txt">${score}</text>` +
-    `<text x="26" y="30" font-size="8" letter-spacing=".6" class="dim">BEST ${g.best}</text>${pips}</g>${status}`
+    `<text x="26" y="30" font-size="8" letter-spacing=".6" class="dim">BEST ${g.best}</text>${pips}${level}</g>${status}`
   )
 }
 
@@ -750,11 +856,11 @@ function card(g: Game, view: View, width: number, now: number) {
   } else if (g.mode === 'paused') {
     title = 'PAUSED'
     line = PAUSE_TEXT[g.why]
-    foot = `${g.score} pts · best ${g.best}`
+    foot = `${g.score} pts · level ${g.level + 1} · best ${g.best}`
   } else {
     title = g.crash?.kind === 'fail' ? 'TESTS FAILED' : 'SQUASHED BY A BUG'
     line = g.isNewBest ? `New best · ${g.score} pts` : `${g.score} pts · best ${g.best}`
-    foot = '✕ to run again'
+    foot = `Reached level ${g.level + 1} · ✕ to run again`
   }
   const age = g.crash === null ? 0 : now - g.crash.wall
   const flash = g.mode === 'over' ? `<rect width="${width}" height="${HEIGHT}" fill="#F0565B" style="opacity:0;animation:flash 450ms ease-out -${n(age)}ms"/>` : ''
@@ -774,10 +880,10 @@ export function drawScene(g: Game, view: View, now: number): string {
   const t = gameTime(g, now)
   const d = distAt(t)
   const live = g.mode === 'running'
-  const speed = speedOf(levelAt(t))
+  const speed = speedAt(t)
   const css: string[] = []
   const scene =
-    backdrop(width, d, speed, live, css) + world(g, width, d, speed, live, css) + runner(g, t, now, live, css) + pops(g, now)
+    backdrop(width, d, speed, live, css) + world(g, width, d, speed, live, css) + runner(g, t, now, live, css) + pops(g, now, width)
   const shake = g.mode === 'over' && g.crash !== null ? ` style="animation:shake 320ms linear -${n(now - g.crash.wall)}ms"` : ''
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${HEIGHT}" viewBox="0 0 ${width} ${HEIGHT}">` +
@@ -785,7 +891,7 @@ export function drawScene(g: Game, view: View, now: number): string {
     `<mask id="bands" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${HEIGHT}"><rect width="${width}" height="${HEIGHT}" fill="#fff"/>` +
     `<rect y="${GROUND - 15}" width="${width}" height="2" fill="#000"/><rect y="${GROUND - 10}" width="${width}" height="2.5" fill="#000"/><rect y="${GROUND - 5}" width="${width}" height="3" fill="#000"/></mask></defs>` +
     `<style>${CSS}${live ? LIVE_CSS : ''}${css.join('')}</style>` +
-    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, live)}${card(g, view, width, now)}</g>` +
+    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${card(g, view, width, now)}</g>` +
     `<rect class="frame" x=".5" y=".5" width="${width - 1}" height="${HEIGHT - 1}" rx="9.5"/></svg>`
   )
 }

@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { act, advance, distAt, gameTime, newGame, nextWake, type Game } from '../hooks/scene'
+import { act, advance, distAt, gameTime, multiplier, newGame, nextWake, speedAt, type Game } from '../hooks/scene'
 
 const BAND = {
   plugin: 'bug-dash',
@@ -78,22 +78,43 @@ function bot(g: Game, now: number) {
   const next = g.things.find(x => x.done === undefined && x.kind !== 'token' && x.x - d + (x.kind === 'bug' ? 21 : 41) > CLAWD_BACK)
   if (next === undefined) return
   const gap = next.x - d + 3 - CLAWD_FRONT
-  const lead = (0.26 + 0.018 * Math.floor(t / 9000)) * 100
+  const lead = speedAt(t) * 100
   if (gap <= 0 || gap >= lead) return
   if (next.kind === 'bug' && g.air === null) act(g, 'jump', now)
   if (next.kind === 'fail' && t >= g.slideUntil) act(g, 'slide', now)
 }
 
-test('every stretch of the course can be cleared by jumping bugs and sliding under banners', () => {
+// Plays a run from `seed` for `ms`, noting the game time each obstacle is cleared.
+function play(seed: number, ms: number) {
   const g = newGame()
   g.width = 1000
-  act(g, 'jump', 0)
-  for (let now = 0; now < 120_000 && g.mode === 'running'; now += 10) {
+  act(g, 'jump', seed)
+  const cleared = new Map<number, number>()
+  for (let now = seed; now < seed + ms && g.mode === 'running'; now += 10) {
     advance(g, now)
     bot(g, now)
+    for (const thing of g.things) if (thing.done === 'passed' && !cleared.has(thing.id)) cleared.set(thing.id, gameTime(g, now))
   }
-  expect(g.mode).toBe('running')
-  expect(g.score).toBeGreaterThan(600)
+  return { g, cleared: [...cleared.values()] }
+}
+
+test('every stretch of the course, to the last level and past it, can be cleared by jumping bugs and sliding under banners', () => {
+  for (const seed of [1, 7_331, 90_210]) {
+    const { g } = play(seed, 420_000)
+    expect(g.mode).toBe('running')
+    expect(g.level).toBeGreaterThan(40)
+  }
+})
+
+test('the run gets harder: faster, with more to clear each second, and worth more', () => {
+  expect(speedAt(0)).toBe(0.26)
+  expect(speedAt(60_000)).toBeGreaterThan(speedAt(30_000))
+  expect(speedAt(180_000)).toBeGreaterThan(0.55)
+  expect(speedAt(3_600_000)).toBe(speedAt(360_000))
+  const { cleared } = play(4_242, 240_000)
+  const rate = (from: number, to: number) => cleared.filter(at => at >= from && at < to).length / ((to - from) / 1000)
+  expect(rate(180_000, 240_000)).toBeGreaterThan(rate(0, 60_000) * 1.5)
+  expect([0, 3, 4, 8, 40].map(multiplier)).toEqual([1, 1, 2, 3, 11])
 })
 
 test('the run only wakes the engine while it is running', () => {
