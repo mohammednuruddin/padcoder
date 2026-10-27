@@ -14,7 +14,7 @@ type Statement = {
 type Env = { DB: { prepare(query: string): Statement } }
 
 const LIMIT_MS = 20 * 60_000 // runs longer than this aren't ranked
-const MAX_MOVES = 20_000
+const MAX_MOVES = 20_000 // 16 presses a second for 20 minutes
 const MAX_BODY = 600_000
 const MAX_TRIES = 300 // runs a player may send in a day
 // One player's run doesn't hold this much of another's moves, each within a
@@ -156,18 +156,22 @@ async function run(request: Request, env: Env) {
 }
 
 // How many of `theirs` have a move of the same kind in `mine` within
-// `near` ms; both are in time order.
+// `near` ms, each of `mine` matching one at most: one pass over each kind of
+// move, both in time order, so it stays linear however dense a log is.
 function held(theirs: readonly Move[], mine: readonly Move[], near: number) {
   let count = 0
-  let from = 0
-  for (const [t, action] of theirs) {
-    while (from < mine.length && (mine[from]?.[0] ?? Infinity) < t - near) from++
-    for (let i = from; i < mine.length; i++) {
-      const [u, other] = mine[i] ?? [Infinity, action]
-      if (u > t + near) break
-      if (other === action) {
+  for (const action of ACTIONS) {
+    const a = theirs.filter(m => m[1] === action).map(m => m[0])
+    const b = mine.filter(m => m[1] === action).map(m => m[0])
+    for (let i = 0, j = 0; i < a.length && j < b.length; ) {
+      const t = a[i] ?? 0
+      const u = b[j] ?? 0
+      if (u < t - near) j++
+      else if (u > t + near) i++
+      else {
         count++
-        break
+        i++
+        j++
       }
     }
   }
