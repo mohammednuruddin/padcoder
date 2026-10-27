@@ -96,7 +96,7 @@ pets live. Clawd runs through a city of code at dusk, jumping bugs, sliding unde
 grabbing ✦ tokens.
 
 - **L1 + Touchpad** shows it and turns the pad into its controller. Press it again to drive Claude.
-  `/bugdash` shows or hides it too.
+  `/bugdash` shows or hides it too, and hiding it gives the pad back to Claude.
 - **✕** or the touchpad jumps (press again in the air to double-jump) · **○** slides under a FAIL banner
   (in the air it dives) · **□ / R1 / R2** dash through anything, using one of three charges ·
   **Options** pauses. No pad? Click **Play** on the band, then use w, s, d and p.
@@ -115,10 +115,11 @@ At the prompt of a Claude Code terminal session:
 /plugin install bug-dash --marketplace mohammednuruddin/padcoder
 ```
 
-Answer `y` to add the marketplace, then press Enter to install for your user. From a shell, use
-`claude plugin install bug-dash --marketplace mohammednuruddin/padcoder`. In the desktop app, click **+**
-next to the prompt box, then **Plugins**, add the marketplace `mohammednuruddin/padcoder`, and add
-**bug-dash**. Once installed, it loads in every session, the desktop app included.
+Answer `y` to add the marketplace, then press Enter to install for your user. From a shell, run
+`claude plugin marketplace add mohammednuruddin/padcoder`, then `claude plugin install bug-dash@padcoder`.
+In the desktop app, click **+** next to the prompt box, then **Plugins**, add the marketplace
+`mohammednuruddin/padcoder`, and add **bug-dash**. Once installed, it loads in every session, the
+desktop app included.
 
 The game draws in the desktop app; a terminal has no SVG, so there the band is left as it was. Every
 open session runs its own copy, so L1 + Touchpad starts the game in each of them: keep one Claude window

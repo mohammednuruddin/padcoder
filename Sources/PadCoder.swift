@@ -82,6 +82,7 @@ final class PadCoder {
             ("com.padcoder.attention", { $0.setState(.needsYou); $0.rumbleAll(pulses: 3) }),
             ("com.padcoder.request", { $0.loadPendingRequest() }),
             ("com.padcoder.game.thud", { $0.rumbleAll(pulses: 2) }),   // Bug Dash: Clawd was caught
+            ("com.padcoder.game.hidden", { $0.setGameMode(false) }),   // Bug Dash was hidden
         ]
         for (name, handler) in signals {
             var token: Int32 = 0

@@ -15,8 +15,11 @@ const SIGNALS: Readonly<Record<string, Signal>> = {
   'com.padcoder.game.dash': 'dash',
   'com.padcoder.game.pause': 'pause',
 }
-// And this rumbles the pad when Clawd is caught.
+// And these go back to PadCoder: Clawd was caught (rumble), or the game was
+// hidden (the pad drives Claude again).
 const THUD = 'com.padcoder.game.thud'
+const HIDDEN = 'com.padcoder.game.hidden'
+const post = ($: EngineInterface, name: string) => void $.process.run(['/usr/bin/notifyutil', '-p', name]).catch(() => undefined)
 
 const claude = atom({ plugin: 'bug-dash', key: 'claude' } as const, 'idle' as ClaudeStatus)
 const shown = atom({ plugin: 'bug-dash', key: 'shown' } as const, false)
@@ -35,7 +38,7 @@ async function settle($: EngineInterface) {
   timer = undefined
   if (game.crash !== null && game.crash !== lastCrash) {
     lastCrash = game.crash
-    void $.process.run(['/usr/bin/notifyutil', '-p', THUD]).catch(() => undefined)
+    post($, THUD)
     if (game.isNewBest) await $.store.set('best', game.best)
   }
   const wait = nextWake(game, await $.clock.now())
@@ -56,7 +59,10 @@ async function handle($: EngineInterface, signal: Signal) {
     if (signal === 'on' && game.mode === 'paused') changed = act(game, 'jump', now)
   } else if (signal === 'off' || signal === 'hide') {
     changed = pause(game, now, signal === 'off' ? 'pad' : 'hidden')
-    if (signal === 'hide') await update($, shown, () => false)
+    if (signal === 'hide') {
+      await update($, shown, () => false)
+      post($, HIDDEN)
+    }
   } else changed = act(game, signal, now)
   if (changed) redraw($)
   await settle($)
