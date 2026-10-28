@@ -37,6 +37,7 @@ let race: Race | undefined
 let raceDay = ''
 let raceAt = -Infinity
 let runDay = ''
+let runs = 0 // runs started here, so a slow answer about an earlier one is known
 const STALE_MS = 10 * 60_000
 // The skin Clawd wears, and the medals that earn them, as of the latest final day.
 let skin: Skin = 'clay'
@@ -155,23 +156,32 @@ async function call($: EngineInterface, path: string, body?: unknown): Promise<A
   }
 }
 
-// Sends a run just ended, then fetches the board it changed.
+// Sends a run just ended, then fetches the board it changed. Where it put the
+// player shows only while that run is the last one, raced under that name.
 async function submit($: EngineInterface, who: Player, run: { readonly day: string; readonly moves: readonly Move[]; readonly score: number }) {
+  const sending = runs
   race = { ...(race ?? { top: [], total: 0 }), sent: 'sending' }
   redraw($)
   const sent = sentOf(await call($, '/run', runBody(who, run.day, run.moves, run.score)))
-  if (race !== undefined) race = { ...race, sent }
-  redraw($)
+  if (player !== who) return
+  if (race !== undefined && runs === sending) {
+    race = { ...race, sent }
+    redraw($)
+  }
   await refresh($)
 }
 
-// Fetches today's board and ghosts; the run goes on offline if it can't.
+// Fetches today's board and ghosts; the run goes on offline if it can't. An
+// answer overtaken by a later fetch, or for a name left meanwhile, is dropped.
+let fetches = 0
 async function refresh($: EngineInterface) {
-  if (player === undefined) return
+  const who = player
+  if (who === undefined) return
+  const fetch = ++fetches
   const now = await $.clock.now()
   const day = dayOf(now)
-  const fresh = boardOf(await call($, boardPath(day, player.name)))
-  if (fresh === undefined || player === undefined) return
+  const fresh = boardOf(await call($, boardPath(day, who.name)))
+  if (fresh === undefined || player !== who || fetch !== fetches) return
   const { ghosts, ...standing } = fresh
   race = { ...standing, sent: race?.sent }
   raceAt = now
@@ -208,7 +218,7 @@ async function wear($: EngineInterface, name: string) {
   }
   if (!hasSkin(want, medals)) return `${want} is earned in the daily race: ${EARNED_BY[want]}.`
   skin = want
-  await $.store.set('skin', want)
+  if (player !== undefined) await $.store.set(`skin:${player.name}`, want)
   redraw($)
   return `Clawd wears ${want}.`
 }
@@ -265,6 +275,7 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
     if (game.mode === 'ready' || game.mode === 'over') {
       runDay = dayOf(now)
       game.seed = daySeed(runDay)
+      runs++
       if (race !== undefined) race = { ...race, sent: undefined }
       if (player !== undefined && raceDay !== runDay) void refresh($)
     }
@@ -345,7 +356,7 @@ export const register: Register = on => {
     sound = (await $.store.get('sound')) !== false
     const kept = (await $.store.get('player')) as Partial<Player> | undefined
     if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
-    const worn = await $.store.get('skin')
+    const worn = player === undefined ? undefined : await $.store.get(`skin:${player.name}`)
     skin = SKINS.find(s => s === worn) ?? 'clay'
     medals = player === undefined ? undefined : medalsFrom(await $.store.get(`medals:${player.name}`))
     void listen($)
@@ -369,7 +380,7 @@ export const register: Register = on => {
       skin = 'clay'
       await $.store.delete('player')
       await $.store.delete(`medals:${left}`)
-      await $.store.delete('skin')
+      await $.store.delete(`skin:${left}`)
       redraw($)
       return { text: `Bug Dash no longer sends runs from here. The name ${left} stays taken.` }
     }
