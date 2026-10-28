@@ -41,19 +41,32 @@ const STALE_MS = 10 * 60_000
 
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
-// Sound, from sounds/: on unless /bugdash sound or Mute turns it off.
+// Sound, from sounds/: on unless /bugdash sound or Mute turns it off. In
+// pad game mode every open session plays the same run, so one at a time owns
+// the sound: the one last played here, or, from the pad, whichever claims it
+// once the owner has gone quiet.
 let sound = true
-const play = ($: EngineInterface, clip: string) => {
-  if (sound) void $.audio.play({ asset: `sounds/${clip}.wav` }, { gain: 0.5 }).catch(() => undefined)
+const ME = Math.random().toString(36).slice(2)
+const OWNER_MS = 5000
+type Owner = { readonly id: string; readonly at: number }
+
+async function play($: EngineInterface, clip: string, here = false) {
+  if (!sound) return
+  const now = await $.clock.now()
+  const owner = (await $.store.get('soundOwner')) as Owner | undefined
+  const mine = owner?.id === ME
+  if (!here && !mine && owner !== undefined && now - owner.at < OWNER_MS) return
+  if (!mine || now - (owner?.at ?? 0) > 1000) await $.store.set('soundOwner', { id: ME, at: now })
+  await $.audio.play({ asset: `sounds/${clip}.wav` }, { gain: 0.5 }).catch(() => undefined)
 }
 // The rules' pops (a token, a smash, a double jump, a level) already heard;
 // each kind has a clip of its name.
 const heard = new WeakSet<object>()
-function listenTo($: EngineInterface, now: number) {
+function listenTo($: EngineInterface, now: number, here = false) {
   for (const pop of game.pops) {
     if (heard.has(pop)) continue
     heard.add(pop)
-    if (now - pop.wall < 250) play($, pop.kind)
+    if (now - pop.wall < 250) void play($, pop.kind, here)
   }
 }
 
@@ -64,7 +77,7 @@ async function settle($: EngineInterface) {
   timer = undefined
   if (game.crash !== null && game.crash !== lastCrash) {
     lastCrash = game.crash
-    play($, 'caught')
+    void play($, 'caught')
     // Taken before anything awaits, so a quick restart can't swap the run.
     if (player !== undefined) void submit($, player, { day: runDay, moves: game.log.slice(), score: game.score })
     post($, THUD)
@@ -122,17 +135,19 @@ async function wake($: EngineInterface) {
 
 // What a press that took sounds like: a run starting, the count after a
 // resume, or the move itself (a double jump is heard from its pop).
-function soundOf($: EngineInterface, signal: Signal, was: string, now: number) {
+function soundOf($: EngineInterface, signal: Signal, was: string, now: number, here: boolean) {
   if (game.mode !== 'running') return
-  if (was === 'ready' || was === 'over') play($, 'start')
-  else if (was === 'paused') play($, 'count')
-  else if (signal === 'slide' || signal === 'dash') play($, signal)
-  else if (signal === 'jump' && !game.pops.some(pop => pop.kind === 'double' && !heard.has(pop))) play($, 'jump')
-  listenTo($, now)
+  if (was === 'ready' || was === 'over') void play($, 'start', here)
+  else if (was === 'paused') void play($, 'count', here)
+  else if (signal === 'slide' || signal === 'dash') void play($, signal, here)
+  else if (signal === 'jump' && !game.pops.some(pop => pop.kind === 'double' && !heard.has(pop))) void play($, 'jump', here)
+  listenTo($, now, here)
 }
 
-async function handle($: EngineInterface, signal: Signal) {
+// `from` the pad, through PadCoder, or here: this session's band or /bugdash.
+async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' = 'here') {
   const now = await $.clock.now()
+  const here = from === 'here'
   let changed = false
   if (signal === 'on' || signal === 'show') {
     await update($, shown, () => true)
@@ -141,7 +156,7 @@ async function handle($: EngineInterface, signal: Signal) {
       padPlays = true
       if (game.mode === 'paused' && act(game, 'jump', now)) {
         changed = true
-        soundOf($, 'jump', 'paused', now)
+        soundOf($, 'jump', 'paused', now, here)
       }
     }
   } else if (signal === 'off' || signal === 'hide') {
@@ -164,7 +179,7 @@ async function handle($: EngineInterface, signal: Signal) {
     }
     const was = game.mode
     changed = act(game, signal, now)
-    if (changed) soundOf($, signal, was, now)
+    if (changed) soundOf($, signal, was, now, here)
   }
   if (changed) redraw($)
   await settle($)
@@ -216,7 +231,7 @@ async function listen($: EngineInterface) {
         // A move means the pad plays a shown run, even in a session that
         // started after game.on.
         if (signal !== 'on' && signal !== 'off' && (await read($, shown))) padPlays = true
-        await handle($, signal)
+        await handle($, signal, 'pad')
       }
     }
   } catch {

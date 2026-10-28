@@ -93,6 +93,49 @@ test('sound: a start, each move, the count after a resume, getting caught, and M
   await ui.unmount()
 })
 
+test("with another session's band owning the sound, the pad's moves stay quiet here; a press here takes it over", async ($, on) => {
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'bugdash' } }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="core" />
+  })
+  mock.store(on, { soundOwner: { id: 'another-session', at: 0 } })
+  const clock = mock.clock(on)
+  const heard: string[] = []
+  on('audio.play', (_, e) => {
+    heard.push(e.clip.asset?.replace(/^sounds\/|\.wav$/g, '') ?? '')
+    return { value: undefined }
+  })
+  const lines: string[] = []
+  let wakeListener = () => {}
+  on('process.spawn', async function* () {
+    for (;;) {
+      for (let line = lines.shift(); line !== undefined; line = lines.shift()) {
+        if (line === 'end') return { value: { code: 0, signal: null } }
+        yield { stream: 'stdout' as const, text: `com.padcoder.game.${line}\n` }
+      }
+      await new Promise<void>(resolve => (wakeListener = resolve))
+    }
+  })
+  const pad = async (move: string) => {
+    lines.push(move)
+    wakeListener()
+    await clock.advance(1)
+  }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await pad('on')
+  await pad('jump')
+  await clock.advance(200)
+  await pad('jump')
+  expect(heard).toEqual([])
+  await ui.press({ key: 'slide' })
+  expect(heard).toEqual(['slide'])
+  await pad('end')
+  await ui.unmount()
+})
+
 test('the terminal has no SVG, so the band is left to the rest', async ($, on) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'bugdash' } }))

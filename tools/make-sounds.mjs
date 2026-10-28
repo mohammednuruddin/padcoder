@@ -1,5 +1,5 @@
-// Synthesizes the chiptune effects in this folder as 16-bit mono WAVs:
-// node mods/bug-dash/sounds/make.mjs mods/bug-dash/sounds
+// Synthesizes Bug Dash's chiptune effects as 16-bit mono WAVs:
+// node tools/make-sounds.mjs mods/bug-dash/sounds
 import { mkdirSync, writeFileSync } from 'node:fs'
 
 const RATE = 22050
