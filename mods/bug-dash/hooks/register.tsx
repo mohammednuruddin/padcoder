@@ -100,10 +100,16 @@ async function play($: EngineInterface, clip: string, here = false) {
 }
 
 // Another session muted, unmuted or took the sound: read where things stand.
+// Only the latest read applies: an earlier one finishing late, or one a
+// toggle here overtook, is dropped.
+let syncs = 0
 async function syncSound($: EngineInterface) {
-  const was = sound
-  sound = (await $.store.get('sound')) !== false
+  const sync = ++syncs
+  const on = (await $.store.get('sound')) !== false
   const owner = await ownerOf($)
+  if (sync !== syncs) return
+  const was = sound
+  sound = on
   if (owner?.id !== ME) mineAt = undefined
   otherUntil = owner !== undefined && owner.id !== ME ? owner.at + OWNER_MS : 0
   if (sound !== was) redraw($)
@@ -186,9 +192,9 @@ async function medalsFor($: EngineInterface, now: number) {
   if (got === undefined || player !== who) return
   medals = got
   medalsDay = day
-  // Kept with the name they are for, so a write landing after a leave can't
-  // dress the next name in them.
-  await $.store.set('medals', { ...got, name: who.name })
+  // Kept under the name they are for, so a write landing after a leave can't
+  // dress, or wipe, the next name's.
+  await $.store.set(`medals:${who.name}`, got)
 }
 
 // /bugdash skin lists the skins; /bugdash skin <name> puts one on.
@@ -254,6 +260,7 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
     }
     padPlays = false
   } else if (await read($, shown)) {
+    if (game.mode === 'paused') await syncSound($)
     // A new run is on today's course, the one everyone runs.
     if (game.mode === 'ready' || game.mode === 'over') {
       runDay = dayOf(now)
@@ -275,6 +282,7 @@ async function stop($: EngineInterface, why: PauseReason) {
 }
 
 async function toggleSound($: EngineInterface) {
+  syncs++
   sound = !sound
   await $.store.set('sound', sound)
   post($, SOUND)
@@ -339,8 +347,7 @@ export const register: Register = on => {
     if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
     const worn = await $.store.get('skin')
     skin = SKINS.find(s => s === worn) ?? 'clay'
-    const earned = (await $.store.get('medals')) as { name?: unknown } | undefined
-    medals = player !== undefined && earned?.name === player.name ? medalsFrom(earned) : undefined
+    medals = player === undefined ? undefined : medalsFrom(await $.store.get(`medals:${player.name}`))
     void listen($)
     void refresh($)
     return started
@@ -361,7 +368,7 @@ export const register: Register = on => {
       medalsDay = ''
       skin = 'clay'
       await $.store.delete('player')
-      await $.store.delete('medals')
+      await $.store.delete(`medals:${left}`)
       await $.store.delete('skin')
       redraw($)
       return { text: `Bug Dash no longer sends runs from here. The name ${left} stays taken.` }
