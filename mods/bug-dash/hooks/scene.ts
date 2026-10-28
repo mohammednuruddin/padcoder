@@ -465,9 +465,10 @@ export function startRace(g: Game, seed: number, at: number, names: readonly str
   })
 }
 
-// A run to play on ahead, apart from the one it was copied from. Its air and
-// crash are only ever replaced, never changed, so they can be shared.
-const copy = (g: Game): Game => ({ ...g, things: g.things.map(thing => ({ ...thing })), log: [...g.log], pops: [], ghosts: [], rivals: [] })
+// A run to play on ahead, apart from the one it was copied from, without its
+// log, which only the known run keeps. Its air and crash are only ever
+// replaced, never changed, so they can be shared.
+const copy = (g: Game): Game => ({ ...g, things: g.things.map(thing => ({ ...thing })), log: [], pops: [], ghosts: [], rivals: [] })
 
 // Where a rival must be by now, in their game time.
 const rivalTime = (rival: Rival, now: number) => Math.min(LIMIT_MS, rival.paused ? rival.t : rival.t + Math.max(0, now - rival.at))
@@ -502,6 +503,25 @@ export function rivalRun(g: Game, name: string, run: RivalRun, now: number): boo
   carry(rival, now)
   return true
 }
+
+// A rival who left the room mid-race stops where they were; one who sat the
+// race out is no rival at all.
+export function rivalGone(g: Game, name: string) {
+  const rival = g.rivals.find(r => r.name === name)
+  if (rival === undefined || rival.over) return false
+  rival.over = true
+  rival.known = rival.shown
+  return true
+}
+export function rivalOut(g: Game, name: string) {
+  const before = g.rivals.length
+  g.rivals = g.rivals.filter(r => r.name !== name)
+  return g.rivals.length !== before
+}
+
+// Whether any rival is still racing, as far as their moves go: one whose run
+// here was caught for want of news waits for the next batch.
+export const rivalsRacing = (g: Game) => g.rivals.some(r => !r.over && r.shown.mode === 'running')
 
 // Where everyone in a room race stands: by score, `you` among them; `racing`
 // for those not caught yet.

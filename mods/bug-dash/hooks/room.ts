@@ -13,18 +13,24 @@ export const newCode = (random: () => number) => Array.from({ length: 5 }, () =>
 
 // curl holds the room's event stream open and writes it out as it comes; it
 // gives up after half an hour, and the room closes an idle stream sooner.
-export const listenArgv = (server: string, code: string, name: string) => [
+// A member back with the secret the room gave them takes their own place again.
+export const listenArgv = (server: string, code: string, name: string, secret?: string) => [
   '/usr/bin/curl', '-sN', '--max-time', '1800', '-H', 'accept: text/event-stream',
-  `${server}/rooms/${code}/listen?name=${encodeURIComponent(name)}&rules=${RULES_VERSION}`,
+  `${server}/rooms/${code}/listen?name=${encodeURIComponent(name)}&rules=${RULES_VERSION}${secret === undefined ? '' : `&secret=${secret}`}`,
 ]
 export const sayPath = (code: string) => `/rooms/${code}/say`
 
+// A race under way as the room has it: every racer's run so far.
+export type RaceOn = { readonly race: number; readonly seed: number; readonly at: number; readonly names: readonly string[]; readonly runs: Readonly<Record<string, Omit<RivalRun, 'from'>>> }
+
 // What the room says: hello (with the secret that signs what this player
-// says, the room's clock and who is in), someone joining or leaving, a race
-// starting, a batch of someone's run, or the room closing the stream.
+// says, the room's clock, who is in and the race on), someone joining or
+// leaving, a race starting, a batch of someone's run, someone sitting a race
+// out, or the room closing the stream.
 export type Heard =
-  | { readonly kind: 'hello'; readonly secret: string; readonly now: number; readonly members: readonly string[] }
+  | { readonly kind: 'hello'; readonly secret: string; readonly now: number; readonly members: readonly string[]; readonly race?: RaceOn }
   | { readonly kind: 'joined' | 'left'; readonly name: string }
+  | { readonly kind: 'skip'; readonly name: string; readonly race: number }
   | { readonly kind: 'start'; readonly race: number; readonly seed: number; readonly at: number; readonly names: readonly string[] }
   | { readonly kind: 'run'; readonly name: string; readonly race: number; readonly run: RivalRun }
   | { readonly kind: 'bye'; readonly why: string }
@@ -51,20 +57,41 @@ export function heard(line: string): Heard | undefined {
   if (isText(d.error)) return { kind: 'bye', why: d.error }
   switch (d.kind) {
     case 'hello':
-      return isText(d.secret) && isNumber(d.now) && isNames(d.members) ? { kind: 'hello', secret: d.secret, now: d.now, members: d.members } : undefined
+      return isText(d.secret) && isNumber(d.now) && isNames(d.members) ? { kind: 'hello', secret: d.secret, now: d.now, members: d.members, race: raceOn(d.race) } : undefined
+    case 'skip':
+      return isText(d.name) && isNumber(d.race) ? { kind: 'skip', name: d.name, race: d.race } : undefined
     case 'joined':
     case 'left':
       return isText(d.name) ? { kind: d.kind, name: d.name } : undefined
     case 'start':
       return isNumber(d.race) && isNumber(d.seed) && isNumber(d.at) && isNames(d.names) ? { kind: 'start', race: d.race, seed: d.seed, at: d.at, names: d.names } : undefined
     case 'run': {
-      const r = (typeof d.run === 'object' && d.run !== null ? d.run : {}) as Record<string, unknown>
-      if (!isText(d.name) || !isNumber(d.race) || !isNumber(r.from) || !isMoves(r.moves) || !isNumber(r.t) || !isNumber(r.wait)) return undefined
-      return { kind: 'run', name: d.name, race: d.race, run: { from: r.from, moves: r.moves, t: r.t, wait: r.wait, paused: r.paused === true, over: r.over === true } }
+      const run = runOf(d.run)
+      return isText(d.name) && isNumber(d.race) && run !== undefined ? { kind: 'run', name: d.name, race: d.race, run } : undefined
     }
     case 'bye':
       return { kind: 'bye', why: isText(d.why) ? d.why : 'The room closed.' }
     default:
       return undefined
   }
+}
+
+const objectOf = (v: unknown) => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined)
+
+function runOf(value: unknown): RivalRun | undefined {
+  const r = objectOf(value)
+  if (r === undefined || !isNumber(r.from) || !isMoves(r.moves) || !isNumber(r.t) || !isNumber(r.wait)) return undefined
+  return { from: r.from, moves: r.moves, t: r.t, wait: r.wait, paused: r.paused === true, over: r.over === true }
+}
+
+function raceOn(value: unknown): RaceOn | undefined {
+  const r = objectOf(value)
+  const runs = objectOf(r?.runs)
+  if (r === undefined || runs === undefined || !isNumber(r.race) || !isNumber(r.seed) || !isNumber(r.at) || !isNames(r.names)) return undefined
+  const read: Record<string, Omit<RivalRun, 'from'>> = {}
+  for (const [name, run] of Object.entries(runs)) {
+    const whole = runOf({ ...objectOf(run), from: 0 })
+    if (whole !== undefined) read[name] = whole
+  }
+  return { race: r.race, seed: r.seed, at: r.at, names: r.names, runs: read }
 }

@@ -26,6 +26,12 @@ function fields(answer: Answer): Record<string, unknown> {
   return {}
 }
 
+// Why the server turned a request away, in its own words.
+export function refusal(answer: Answer) {
+  const error = fields(answer).error
+  return typeof error === 'string' ? error : `The race answered ${answer.status}.`
+}
+
 const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const isText = (v: unknown): v is string => typeof v === 'string'
 const isMoves = (v: unknown): v is Move[] =>

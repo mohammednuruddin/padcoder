@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
-import { EARNED_BY, SERVER, asked, boardOf, boardPath, hasSkin, joined, medalsFrom, medalsOf, medalsPath, runBody, sentOf, type Answer, type Medals, type Player } from './race'
+import { EARNED_BY, SERVER, asked, boardOf, boardPath, hasSkin, joined, medalsFrom, medalsOf, medalsPath, refusal, runBody, sentOf, type Answer, type Medals, type Player } from './race'
 import { CODE, NAME, heard as roomHeard, listenArgv, newCode, sayPath, type Heard } from './room'
 import {
-  COUNTDOWN_MS, FINAL_MS, SKINS, act, advance, dayOf, daySeed, drawScene, gameTime, newGame, nextWake, pause, rivalRun, sceneAlt, setGhosts, startRace, widthFor,
+  COUNTDOWN_MS, FINAL_MS, SKINS, act, advance, dayOf, daySeed, drawScene, gameTime, newGame, nextWake, pause, rivalGone, rivalOut, rivalRun, rivalsRacing, sceneAlt,
+  setGhosts, startRace, widthFor,
   type Action, type Move, type PauseReason, type Race, type RoomView, type Skin,
 } from './scene'
 
@@ -147,6 +148,15 @@ async function settle($: EngineInterface) {
   }
   const wait = nextWake(game, await $.clock.now())
   if (wait !== undefined) timer = $.clock.after(wait, () => void wake($))
+  else if (rivalsRacing(game) && (await read($, shown))) timer = $.clock.after(WATCH_MS, () => void watch($))
+}
+
+// Caught or paused, with rivals still racing: carries them on and redraws.
+async function watch($: EngineInterface) {
+  timer = undefined
+  advance(game, await $.clock.now())
+  redraw($)
+  await settle($)
 }
 
 // One request to the race server; undefined when it can't be reached.
@@ -250,13 +260,16 @@ type Room = {
   again: boolean
   tries: number
   fails: number
+  // A try to listen again, waiting.
+  retry?: Timer
 }
 let room: Room | undefined
 // Whether this run is a room race, which the daily race never hears of.
 let roomRun = false
 const RETRY_MS = 3000
 const TRIES = 2
-const BATCH_MS = 250
+const BATCH_MS = 600 // a run's moves go to the room at most this often
+const WATCH_MS = 500 // caught, with rivals still racing, the band redraws this often
 const FAILS = 3
 const NUDGE_MS = 125
 
@@ -282,7 +295,7 @@ async function listenRoom($: EngineInterface) {
   if (base === '' || room !== here || here.stop !== undefined) return
   here.state = 'joining'
   redraw($)
-  const stream = $.process.spawn({ argv: listenArgv(base, here.code, here.name) })
+  const stream = $.process.spawn({ argv: listenArgv(base, here.code, here.name, here.secret) })
   here.stop = () => void stream.return({ code: null, signal: null }).catch(() => undefined)
   let pending = ''
   let why: string | undefined
@@ -304,36 +317,69 @@ async function listenRoom($: EngineInterface) {
     // No curl, or it couldn't start: the room is lost.
   }
   here.stop = undefined
-  here.secret = undefined
   if (room !== here) return
   here.state = 'lost'
   redraw($)
   if (why !== undefined) $.ui.toast(`Bug Dash room ${here.code}: ${why}`)
-  else if (here.tries++ < TRIES && (await read($, shown))) $.clock.after(RETRY_MS, () => void listenRoom($))
+  else if (here.tries++ < TRIES && (await read($, shown))) {
+    here.retry = $.clock.after(RETRY_MS, () => {
+      here.retry = undefined
+      void (async () => {
+        if (room === here && (await read($, shown))) await listenRoom($)
+      })()
+    })
+  }
+}
+
+// Stops listening to the room, and tells it so it lets the name go at once.
+function quitRoom($: EngineInterface, here: Room) {
+  here.retry?.cancel()
+  here.retry = undefined
+  if (here.stop === undefined) return
+  here.stop()
+  if (here.secret !== undefined) void call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'bye' })
 }
 
 async function onHeard($: EngineInterface, here: Room, h: Exclude<Heard, { kind: 'bye' }>) {
   const now = await $.clock.now()
   switch (h.kind) {
-    case 'hello':
+    case 'hello': {
       here.secret = h.secret
       here.offset = h.now - now
       here.others = h.members.filter(name => name !== here.name)
       here.state = 'in'
       here.tries = 0
+      // Back in the race this run is in: the room's moves fill in whatever
+      // was missed, and this run's go on from what the room has of them.
+      const on = h.race
+      if (on !== undefined && roomRun && on.race === here.race) {
+        for (const [name, run] of Object.entries(on.runs)) {
+          if (name === here.name) here.sent = Math.min(here.sent, run.moves.length)
+          else rivalRun(game, name, { ...run, from: 0 }, now)
+        }
+        void sendRun($)
+      }
       redraw($)
       return
+    }
     case 'joined':
       if (h.name !== here.name && !here.others.includes(h.name)) here.others = [...here.others, h.name]
       redraw($)
       return
     case 'left':
       here.others = here.others.filter(name => name !== h.name)
+      rivalGone(game, h.name)
       redraw($)
       return
+    case 'skip':
+      if (h.race === here.race && rivalOut(game, h.name)) redraw($)
+      return
     case 'start': {
-      // A run under way plays on; everyone else is off together.
-      if (game.mode === 'running' || game.mode === 'paused') return
+      // A run under way plays on, and sits the race out; everyone else is off together.
+      if (game.mode === 'running' || game.mode === 'paused') {
+        if (here.secret !== undefined) void call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'skip' })
+        return
+      }
       const at = h.at - here.offset
       startRace(game, h.seed, at, h.names.filter(name => name !== here.name))
       here.race = h.race
@@ -394,7 +440,8 @@ async function askStart($: EngineInterface) {
   const here = room
   if (here?.secret === undefined) return
   const answer = await call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'start' })
-  if (answer === undefined || answer.status >= 300) $.ui.toast("Bug Dash couldn't reach the room to start a race.")
+  if (answer === undefined || answer.status >= 500) $.ui.toast("Bug Dash couldn't reach the room to start a race.")
+  else if (answer.status >= 300) $.ui.toast(`Bug Dash: ${refusal(answer)}`)
 }
 
 // /bugdash room opens a room, /bugdash room <code> [name] joins one, and
@@ -403,7 +450,7 @@ async function roomCommand($: EngineInterface, word: string, given: string) {
   if (word.toLowerCase() === 'leave') {
     if (room === undefined) return 'You are not in a room.'
     const left = room.code
-    room.stop?.()
+    quitRoom($, room)
     room = undefined
     redraw($)
     return `You left room ${left}.`
@@ -416,7 +463,7 @@ async function roomCommand($: EngineInterface, word: string, given: string) {
   const name = given || player?.name || ''
   if (!NAME.test(name)) return 'Race under a name: /bugdash room <code> <name>, 2 to 16 letters, digits, _ or -. Your daily race name is used if you have one.'
   if ((await serverOf($)) === '') return "The race server isn't up yet."
-  room?.stop?.()
+  if (room !== undefined) quitRoom($, room)
   room = { code, name, others: [], state: 'joining', offset: 0, sent: 0, sending: false, again: false, tries: 0, fails: 0 }
   await handle($, 'show')
   return word === ''
@@ -470,7 +517,7 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
     if (signal === 'hide') {
       await update($, shown, () => false)
       // A hidden band leaves the room's stream; showing it joins again.
-      room?.stop?.()
+      if (room !== undefined) quitRoom($, room)
       // Hiding the run the pad plays hands the pad back to Claude, which
       // pauses the copies in other sessions too; a run shown with /bugdash
       // alone leaves the pad be.
