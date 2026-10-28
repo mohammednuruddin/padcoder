@@ -88,6 +88,11 @@ async function play($: EngineInterface, clip: string, here = false) {
     // Any session that thought it held the sound lets go.
     post($, SOUND)
   } else if (now - (mineAt ?? 0) > RENEW_MS) {
+    // Renewed only while still held: another may have taken it, its post on the way.
+    if ((await ownerOf($))?.id !== ME) {
+      mineAt = undefined
+      return
+    }
     await $.store.set('soundOwner', { id: ME, at: now })
     mineAt = now
   }
@@ -181,7 +186,9 @@ async function medalsFor($: EngineInterface, now: number) {
   if (got === undefined || player !== who) return
   medals = got
   medalsDay = day
-  await $.store.set('medals', got)
+  // Kept with the name they are for, so a write landing after a leave can't
+  // dress the next name in them.
+  await $.store.set('medals', { ...got, name: who.name })
 }
 
 // /bugdash skin lists the skins; /bugdash skin <name> puts one on.
@@ -226,8 +233,8 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
   let changed = false
   if (signal === 'on' || signal === 'show') {
     await update($, shown, () => true)
-    // Whatever was posted before this session listened.
-    void syncSound($)
+    // Whatever was posted before this session listened, before a resume can sound.
+    await syncSound($)
     if (now - raceAt > STALE_MS) void refresh($)
     if (signal === 'on') {
       padPlays = true
@@ -332,7 +339,8 @@ export const register: Register = on => {
     if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
     const worn = await $.store.get('skin')
     skin = SKINS.find(s => s === worn) ?? 'clay'
-    medals = medalsFrom(await $.store.get('medals'))
+    const earned = (await $.store.get('medals')) as { name?: unknown } | undefined
+    medals = player !== undefined && earned?.name === player.name ? medalsFrom(earned) : undefined
     void listen($)
     void refresh($)
     return started
