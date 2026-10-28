@@ -8,3 +8,13 @@ binding = "DB"
 database_name = "bug-dash"
 # The id `wrangler d1 create bug-dash` printed; to host your own, put yours here.
 database_id = "2e406196-f651-400d-b0a9-cbd0efb169d9"
+
+# Rooms to race friends live in: one Durable Object each, holding nothing but
+# its members while they listen.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

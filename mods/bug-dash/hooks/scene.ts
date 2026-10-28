@@ -40,7 +40,7 @@ const DIVE_V = -0.42
 const CEILING = 50
 const SLIDE_MS = 520
 const DASH_MS = 420
-const COUNTDOWN_MS = 1200 // a resumed run counts 3, 2, 1 with the world still
+export const COUNTDOWN_MS = 1200 // a resumed run counts 3, 2, 1 with the world still
 const REGEN = 1 / 6500 // dash charges a millisecond
 const CHARGES = 3
 
@@ -120,11 +120,24 @@ export type Game = {
   pops: Pop[]
   crash: { readonly kind: Kind; readonly h: number; readonly wall: number } | null
   ghosts: Ghost[]
+  rivals: Rival[]
 }
 
 // Another player's run of the day, raced as a ghost from its moves.
 export type GhostRun = { readonly name: string; readonly score: number; readonly moves: readonly Move[] }
 type Ghost = GhostRun & { readonly seed: number; readonly endsAt: number; game: Game; next: number }
+
+// A friend racing the same course at the same moment, in a room. Their moves
+// come in batches: `known` is their run played on to the last move known, and
+// `shown` that run carried on to where they must be now: game time `t` as of
+// `at` (wall time here), standing still while paused.
+export type Rival = { readonly name: string; known: Game; shown: Game; t: number; at: number; paused: boolean; over: boolean }
+// One batch of a rival's run: their moves from index `from` on, their game
+// time `t` and how long until their clock runs again (`wait`, counting down
+// after a resume), whether they are paused, and whether they were caught,
+// which comes with every move they made.
+export type RivalRun = { readonly from: number; readonly moves: readonly Move[]; readonly t: number; readonly wait: number; readonly paused: boolean; readonly over: boolean }
+export const ROOM_SIZE = 4
 
 // The daily race as the band shows it, once the player has joined.
 export type Race = {
@@ -139,14 +152,18 @@ export type Race = {
 export const SKINS = ['clay', 'copper', 'silver', 'gold'] as const
 export type Skin = (typeof SKINS)[number]
 
-export type View = { readonly width: number; readonly claude: ClaudeStatus; readonly race?: Race; readonly skin?: Skin }
+// The room the player races friends in, as the band shows it: its code, who
+// else is in it, and whether the connection to it holds.
+export type RoomView = { readonly code: string; readonly others: readonly string[]; readonly state: 'joining' | 'in' | 'lost' }
+
+export type View = { readonly width: number; readonly claude: ClaudeStatus; readonly race?: Race; readonly skin?: Skin; readonly room?: RoomView }
 
 export const widthFor = (columns: number) => Math.min(WIDEST, Math.max(360, Math.round(columns * 8)))
 
 export const newGame = (): Game => ({
   mode: 'ready', why: 'you', seed: 1, rng: 1, gameAt: 0, clockAt: 0, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
   slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, shield: false, magnetUntil: 0, things: [], log: [], nextId: 1, aheadTo: 0,
-  level: 0, charges: 1, score: 0, best: 0, isNewBest: false, pops: [], crash: null, ghosts: [],
+  level: 0, charges: 1, score: 0, best: 0, isNewBest: false, pops: [], crash: null, ghosts: [], rivals: [],
 })
 
 export const gameTime = (g: Game, now: number) => (g.mode === 'running' ? g.gameAt + Math.max(0, now - g.clockAt) : g.gameAt)
@@ -393,7 +410,7 @@ function start(g: Game, now: number) {
   Object.assign(g, {
     mode: 'running', why: 'you', rng: g.seed, gameAt: 0, clockAt: now, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
     slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, shield: false, magnetUntil: 0, things: [], log: [], aheadTo: RX + 300,
-    level: 0, charges: 1, score: 0, isNewBest: false, pops: [], crash: null,
+    level: 0, charges: 1, score: 0, isNewBest: false, pops: [], crash: null, rivals: [],
   } satisfies Partial<Game>)
   generate(g, AHEAD + WIDEST)
   g.ghosts = g.ghosts.filter(ghost => ghost.seed === g.seed)
@@ -432,6 +449,68 @@ function follow(ghost: Ghost, t: number): boolean {
     moved = move(run, m[1], m[0], m[0]) || moved
   }
   return runTo(run, t, t) === 'over' || moved
+}
+
+// A race in a room: everyone on `seed`, off together at wall time `at` after
+// a count, with each of `names` alongside as a rival.
+export function startRace(g: Game, seed: number, at: number, names: readonly string[]) {
+  g.seed = seed
+  start(g, at)
+  g.countdownUntil = at
+  g.rivals = names.slice(0, ROOM_SIZE - 1).map(name => {
+    const known = newGame()
+    known.seed = seed
+    start(known, 0)
+    return { name, known, shown: copy(known), t: 0, at, paused: false, over: false }
+  })
+}
+
+// A run to play on ahead, apart from the one it was copied from. Its air and
+// crash are only ever replaced, never changed, so they can be shared.
+const copy = (g: Game): Game => ({ ...g, things: g.things.map(thing => ({ ...thing })), log: [...g.log], pops: [], ghosts: [], rivals: [] })
+
+// Where a rival must be by now, in their game time.
+const rivalTime = (rival: Rival, now: number) => Math.min(LIMIT_MS, rival.paused ? rival.t : rival.t + Math.max(0, now - rival.at))
+
+// Carries a rival's shown run on to now. It may be caught here only for want
+// of moves still on their way; the drawing holds it running until they are.
+function carry(rival: Rival, now: number) {
+  const t = rivalTime(rival, now)
+  if (rival.shown.mode === 'running' && t > rival.shown.simAt) runTo(rival.shown, t, t)
+}
+
+// Takes in a batch of a rival's run; false when it brings nothing new.
+export function rivalRun(g: Game, name: string, run: RivalRun, now: number): boolean {
+  const rival = g.rivals.find(r => r.name === name)
+  if (rival === undefined || rival.over || run.from > rival.known.log.length) return false
+  const known = rival.known
+  for (const m of run.moves.slice(known.log.length - run.from)) {
+    if (known.mode !== 'running' || !(m[0] >= known.simAt) || runTo(known, m[0], m[0]) === 'over') break
+    move(known, m[1], m[0], m[0])
+    // Kept in step with their log whatever the move did here, so batches line up.
+    known.log.push(m)
+  }
+  rival.t = run.t
+  rival.at = now + run.wait
+  rival.paused = run.paused
+  // Caught, with every move in: their run ends here where it ended there.
+  if (run.over) {
+    runTo(known, run.t, run.t)
+    rival.over = true
+  }
+  rival.shown = copy(known)
+  carry(rival, now)
+  return true
+}
+
+// Where everyone in a room race stands: by score, `you` among them; `racing`
+// for those not caught yet.
+export function standings(g: Game): readonly { readonly name: string; readonly score: number; readonly racing: boolean }[] {
+  const rows = [
+    { name: 'you', score: g.score, racing: g.mode === 'running' || g.mode === 'paused' },
+    ...g.rivals.map(r => ({ name: r.name, score: r.over ? r.known.score : r.shown.score, racing: !r.over })),
+  ]
+  return rows.sort((a, b) => b.score - a.score)
 }
 
 function crash(g: Game, kind: Kind, t: number, wall: number) {
@@ -526,6 +605,7 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
   const result = runTo(g, gameTime(g, now), now)
   let ghosts = false
   for (const ghost of g.ghosts) ghosts = follow(ghost, gameTime(g, now)) || ghosts
+  for (const rival of g.rivals) carry(rival, now)
   return (counted || ghosts) && result === 'none' ? 'changed' : result
 }
 
@@ -693,6 +773,9 @@ function sentText(race: Race | undefined) {
   return `#${sent.rank} of ${sent.total} today · best ${sent.best}`
 }
 
+const roomAlt = (view: View) =>
+  view.room === undefined ? '' : ` Room ${view.room.code}, ${view.room.state}${view.room.others.length > 0 ? `, with ${view.room.others.join(', ')}` : ''}.`
+
 // What caught Clawd.
 const caughtBy = (kind: Kind | undefined) =>
   kind === 'fail' ? 'tests failed' : kind === 'moth' ? 'caught by a moth' : kind === 'gate' ? 'blocked by CI' : 'squashed by a bug'
@@ -703,13 +786,16 @@ export function sceneAlt(g: Game, view: View): string {
   const powers = `${g.shield ? ', shielded' : ''}${g.simAt < g.magnetUntil ? ', magnet on' : ''}`
   switch (g.mode) {
     case 'ready':
-      return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.${race ? ` ${standing(race)}.` : ''}`
+      return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.${race ? ` ${standing(race)}.` : ''}${roomAlt(view)}`
     case 'running':
       return `Bug Dash, running: ${g.score} points, level ${g.level + 1}, best ${g.best}${powers}.${status ? ` ${status}.` : ''}`
     case 'paused':
       return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, level ${g.level + 1}, best ${g.best}${powers}.`
     case 'over':
-      return `Bug Dash, over: ${caughtBy(g.crash?.kind)} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.${sentText(race) ? ` ${sentText(race)}.` : ''}`
+      return (
+        `Bug Dash, over: ${caughtBy(g.crash?.kind)} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.` +
+        `${sentText(race) ? ` ${sentText(race)}.` : ''}${g.rivals.length > 0 ? ` Race: ${standingText(g)}.` : ''}${roomAlt(view)}`
+      )
   }
 }
 
@@ -1110,6 +1196,32 @@ function runner(g: Game, t: number, now: number, live: boolean, css: string[]) {
 const esc = (text: string) => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)
 const ghostX = (i: number) => RX - 9 * (i + 1)
 
+// Another run's Clawd at its game time `t`, going through the poses its moves
+// make; `key` names its hop's keyframes.
+function figure(run: Game, t: number, live: boolean, css: string[], key: string) {
+  const h = heightAt(run.air, t)
+  const airEnd = run.air === null ? 0 : landTime(run.air) - t
+  const slideEnd = run.slideUntil - t
+  let hop = h > 0 ? ` transform="translate(0 ${n(-h)})"` : ''
+  let poses: string
+  if (!live) {
+    poses = h > 0 ? '<use href="#cAir"/>' : isSliding(run, t) ? '<use href="#cSlide" y="10"/>' : '<use href="#cRunA"/>'
+  } else {
+    if (run.air !== null && airEnd > 8) {
+      const air = run.air
+      const frames = Array.from({ length: 13 }, (_, k) => [(k / 12) * 100, heightAt(air, t + (airEnd * k) / 12)] as const)
+      css.push(`@keyframes ${key}{${frames.map(([at, y]) => `${n(at)}%{transform:translateY(${n(-y)}px)}`).join('')}}`)
+      hop = ` style="animation:${key} ${n(airEnd)}ms linear forwards"`
+    }
+    const upTo = Math.max(0, airEnd)
+    poses =
+      (run.air !== null ? `<g ${during(0, airEnd)}><use href="#cAir"/></g>` : '') +
+      (slideEnd > upTo ? `<g ${during(upTo, slideEnd)}><use href="#cSlide" y="10"/></g>` : '') +
+      `<g ${during(Math.max(upTo, slideEnd, 0), Infinity)}><use class="la" href="#cRunA"/><use class="lb" href="#cRunB"/></g>`
+  }
+  return `<g${hop}>${poses}</g>`
+}
+
 // Ghosts run a step behind Clawd, faint, going through the poses their moves
 // make, with their names and scores on the ground beneath.
 function ghostRunners(g: Game, t: number, live: boolean, css: string[]) {
@@ -1118,30 +1230,50 @@ function ghostRunners(g: Game, t: number, live: boolean, css: string[]) {
       const run = ghost.game
       const tag = `<text class="dim" x="${ghostX(i) + 27}" y="${GROUND + 9 + i * 7}" text-anchor="middle" font-size="6.5" ${FONT}>${esc(ghost.name)} ${run.mode === 'over' ? '✕ ' : ''}${run.score}</text>`
       if (run.mode !== 'running') return tag
-      const h = heightAt(run.air, t)
-      const airEnd = run.air === null ? 0 : landTime(run.air) - t
-      const slideEnd = run.slideUntil - t
-      let hop = h > 0 ? ` transform="translate(0 ${n(-h)})"` : ''
-      let poses: string
-      if (!live) {
-        poses = h > 0 ? '<use href="#cAir"/>' : isSliding(run, t) ? '<use href="#cSlide" y="10"/>' : '<use href="#cRunA"/>'
-      } else {
-        if (run.air !== null && airEnd > 8) {
-          const air = run.air
-          const frames = Array.from({ length: 13 }, (_, k) => [(k / 12) * 100, heightAt(air, t + (airEnd * k) / 12)] as const)
-          css.push(`@keyframes ghop${i}{${frames.map(([at, y]) => `${n(at)}%{transform:translateY(${n(-y)}px)}`).join('')}}`)
-          hop = ` style="animation:ghop${i} ${n(airEnd)}ms linear forwards"`
-        }
-        const upTo = Math.max(0, airEnd)
-        poses =
-          (run.air !== null ? `<g ${during(0, airEnd)}><use href="#cAir"/></g>` : '') +
-          (slideEnd > upTo ? `<g ${during(upTo, slideEnd)}><use href="#cSlide" y="10"/></g>` : '') +
-          `<g ${during(Math.max(upTo, slideEnd, 0), Infinity)}><use class="la" href="#cRunA"/><use class="lb" href="#cRunB"/></g>`
-      }
-      return `<g class="ghost" transform="translate(${ghostX(i)} ${GROUND - CLAWD_H})" shape-rendering="crispEdges"><g${hop}>${poses}</g></g>${tag}`
+      return `<g class="ghost" transform="translate(${ghostX(i)} ${GROUND - CLAWD_H})" shape-rendering="crispEdges">${figure(run, t, live, css, `ghop${i}`)}</g>${tag}`
     })
     .join('')
 }
+
+// Rivals in a room race run where they are on the course, each tinted its
+// own colour: level with Clawd, or ahead or behind by however long one of
+// them was paused. A rival caught for want of moves still on their way is
+// held running; one really caught lies where it fell.
+const RIVAL_HUE = [150, 215, 285]
+const RIVAL_DOT = ['#4fc3a1', '#7393ea', '#c879cb']
+const rivalX = (i: number) => RX - 14 * (i + 1)
+function rivalRunners(g: Game, width: number, d: number, live: boolean, css: string[]) {
+  return g.rivals
+    .map((rival, i) => {
+      const at = rival.over ? rival.known.gameAt : rival.shown.simAt
+      const x = rivalX(i) + distAt(at) - d
+      if (x < -60 || x > width) return ''
+      const body = rival.over ? '<use href="#cDead"/>' : rival.shown.mode === 'running' ? figure(rival.shown, at, live, css, `rhop${i}`) : '<use href="#cRunA"/>'
+      return `<g style="filter:hue-rotate(${RIVAL_HUE[i] ?? 0}deg) saturate(1.3);opacity:.62" transform="translate(${n(x)} ${GROUND - CLAWD_H})" shape-rendering="crispEdges">${body}</g>`
+    })
+    // The nearest drawn last, over those behind it.
+    .reverse()
+    .join('')
+}
+
+// The race as it stands, under the score: each rival's colour, name and score.
+function rivalBoard(g: Game) {
+  if (g.rivals.length === 0 || (g.mode !== 'running' && g.mode !== 'paused')) return ''
+  const rows = g.rivals
+    .map((rival, i) => {
+      const score = rival.over ? rival.known.score : rival.shown.score
+      const state = rival.over ? ' ✕' : rival.paused ? ' ‖' : ''
+      return `<circle cx="15" cy="${n(65.5 + i * 8)}" r="2.2" fill="${RIVAL_DOT[i] ?? CLAY}"/><text x="21" y="${n(68 + i * 8)}" font-size="7" class="txt">${esc(rival.name)} ${score}${state}</text>`
+    })
+    .join('')
+  return `<g ${FONT}><rect class="chip" x="7" y="58" width="86" height="${g.rivals.length * 8 + 6}" rx="6"/>${rows}</g>`
+}
+
+// A room race's standings, one line: `…` after anyone still running.
+const standingText = (g: Game) =>
+  standings(g)
+    .map((row, i) => `${i + 1}. ${row.name} ${row.score}${row.racing ? '…' : ''}`)
+    .join(' · ')
 
 // Caught ghosts lie where they fell, and the world carries them off.
 function fallenGhosts(g: Game, d: number) {
@@ -1236,18 +1368,31 @@ function card(g: Game, view: View, width: number, now: number) {
   let title: string
   let line: string
   let foot: string
+  const room = view.room
   if (g.mode === 'ready') {
     title = 'BUG DASH'
     line = '✕ jump · ○ slide · □ dash · Options pause'
     foot = view.race ? standing(view.race) : `Best ${g.best} · no pad? Play, then w s d p · /bugdash join <name> to race`
+    if (room !== undefined) {
+      line = room.state === 'joining' ? 'Joining the room…' : room.state === 'lost' ? 'Lost the room · ✕ to try it again' : '✕ starts a race for the whole room'
+      foot = `Room ${room.code} · ${room.others.length > 0 ? `with ${room.others.join(', ')}` : 'nobody else here yet'} · /bugdash room leave`
+    }
   } else if (g.mode === 'paused') {
     title = 'PAUSED'
     line = PAUSE_TEXT[g.why]
     foot = `${g.score} pts · level ${g.level + 1} · best ${g.best}`
+  } else if (g.rivals.length > 0) {
+    // A room race: the winner, once everyone is caught, and the standings.
+    const table = standings(g)
+    const first = table[0]
+    const done = table.every(row => !row.racing)
+    title = done && first !== undefined ? (first.name === 'you' ? 'YOU WIN THE RACE' : `${first.name.toUpperCase()} WINS`) : caughtBy(g.crash?.kind).toUpperCase()
+    line = done ? `${g.score} pts · ${caughtBy(g.crash?.kind)}` : `${g.score} pts · the others race on`
+    foot = `${standingText(g)}${room !== undefined ? ' · ✕ to race again' : ''}`
   } else {
     title = caughtBy(g.crash?.kind).toUpperCase()
     line = g.isNewBest ? `New best · ${g.score} pts` : `${g.score} pts · best ${g.best}`
-    foot = `${sentText(view.race) ?? `Reached level ${g.level + 1}`} · ✕ to run again`
+    foot = `${sentText(view.race) ?? `Reached level ${g.level + 1}`} · ✕ to ${room === undefined ? 'run again' : 'race the room'}`
   }
   const age = g.crash === null ? 0 : now - g.crash.wall
   const flash = g.mode === 'over' ? `<rect width="${width}" height="${HEIGHT}" fill="#F0565B" style="opacity:0;animation:flash 450ms ease-out -${n(age)}ms"/>` : ''
@@ -1261,12 +1406,17 @@ function card(g: Game, view: View, width: number, now: number) {
   )
 }
 
-// The 3, 2, 1 after a resume, over a world standing still.
+// The 3, 2, 1 after a resume, over a world standing still; a room race's
+// longer wait says GET READY first.
 function countdown(g: Game, width: number, now: number) {
   const left = g.countdownUntil - now
   if (g.mode !== 'running' || left <= 0) return ''
   const beat = COUNTDOWN_MS / 3
-  return [3, 2, 1]
+  const ready =
+    left > COUNTDOWN_MS
+      ? `<g ${during(0, left - COUNTDOWN_MS)}><text class="up" x="${n(width / 2)}" y="54" font-size="15" font-weight="800" letter-spacing="3" text-anchor="middle" stroke-width="3" paint-order="stroke" ${FONT}>GET READY</text></g>`
+      : ''
+  return ready + [3, 2, 1]
     .map((digit, i) => {
       const from = i * beat - (COUNTDOWN_MS - left)
       if (from + beat <= 0) return ''
@@ -1290,6 +1440,7 @@ export function drawScene(g: Game, view: View, now: number): string {
     backdrop(width, d, speed, live, css) +
     world(g, t, width, d, speed, live, css) +
     ghostRunners(g, t, live, css) +
+    rivalRunners(g, width, d, live, css) +
     runner(g, t, now, live, css) +
     pops(g, now, width)
   const shake = g.mode === 'over' && g.crash !== null ? ` style="animation:shake 320ms linear -${n(now - g.crash.wall)}ms"` : ''
@@ -1299,7 +1450,7 @@ export function drawScene(g: Game, view: View, now: number): string {
     `<mask id="bands" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${HEIGHT}"><rect width="${width}" height="${HEIGHT}" fill="#fff"/>` +
     `<rect y="${GROUND - 15}" width="${width}" height="2" fill="#000"/><rect y="${GROUND - 10}" width="${width}" height="2.5" fill="#000"/><rect y="${GROUND - 5}" width="${width}" height="3" fill="#000"/></mask></defs>` +
     `<style>${CSS}${SKIN_CSS[view.skin ?? 'clay']}${live ? LIVE_CSS : ''}${css.join('')}</style>` +
-    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${countdown(g, width, now)}${card(g, view, width, now)}</g>` +
+    `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${rivalBoard(g)}${countdown(g, width, now)}${card(g, view, width, now)}</g>` +
     `<rect class="frame" x=".5" y=".5" width="${width - 1}" height="${HEIGHT - 1}" rx="9.5"/></svg>`
   )
 }

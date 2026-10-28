@@ -499,3 +499,90 @@ test('a magnet running out redraws the run, so its icon leaves the HUD', () => {
   expect(run(0)).toBe('none')
   expect(run(250)).toBe('changed')
 })
+
+test('a room: join it, start a race for everyone, see a rival run from the batches they send, and the standings; the daily race hears nothing', { timeoutMs: 15_000 }, async ($, on) => {
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'bugdash' } }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="core" />
+  })
+  // Joined the daily race too, to be sure a room race never goes to it.
+  mock.store(on, { player: { name: 'ada', token: 't0k3n' } })
+  mock.env(on, { BUG_DASH_SERVER: 'http://race.test' })
+  const clock = mock.clock(on)
+  const asked: string[] = []
+  const said: Record<string, unknown>[] = []
+  on('http.fetch', (_, e) => {
+    const path = e.url.replace('http://race.test', '')
+    asked.push(`${e.init?.method ?? 'GET'} ${path.split('?')[0]}`)
+    if (path.startsWith('/rooms/')) said.push(JSON.parse(e.init?.body ?? '{}') as Record<string, unknown>)
+    const answer = (status: number, value: unknown) => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(value) } })
+    if (path.startsWith('/day/')) return answer(200, { rules: RULES_VERSION, total: 0, top: [], ghosts: [] })
+    if (path.startsWith('/medals/')) return answer(200, { name: 'ada', gold: 0, silver: 0, copper: 0 })
+    return answer(204, {})
+  })
+  // The room's stream, through curl; notifyutil has nothing to say here.
+  const heard: string[] = []
+  let wakeStream = () => {}
+  let listened: readonly string[] = []
+  on('process.spawn', async function* (_, e) {
+    if (!e.argv[0]?.endsWith('curl')) return { value: { code: 0, signal: null } }
+    listened = e.argv
+    for (;;) {
+      for (let line = heard.shift(); line !== undefined; line = heard.shift()) yield { stream: 'stdout' as const, text: `data: ${line}\n\n` }
+      await new Promise<void>(resolve => (wakeStream = resolve))
+    }
+  })
+  const room = async (event: unknown) => {
+    heard.push(JSON.stringify(event))
+    wakeStream()
+    await clock.advance(1)
+  }
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const alt = async () => (await ui.find({ type: 'Svg' }))?.props.alt as string | undefined
+  const svg = async () => (await ui.find({ type: 'Svg' }))?.props.source as string | undefined
+
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'room k7qxm' }))).toMatch(/in room K7QXM as ada/)
+  expect(listened.at(-1)).toMatch(/\/rooms\/K7QXM\/listen\?name=ada&rules=2$/)
+  await room({ kind: 'hello', secret: 's3cr3t', now: clock.now(), members: ['ada', 'bo'] })
+  expect(await alt()).toMatch(/ready.*Room K7QXM, in, with bo/)
+
+  // ✕ asks the room to start; the room starts everyone 3 s from now.
+  await ui.press({ key: 'play' })
+  expect(said.at(-1)).toMatchObject({ name: 'ada', secret: 's3cr3t', kind: 'start' })
+  const seed = 4_242
+  await room({ kind: 'start', race: 1, seed, at: clock.now() + 3000, names: ['ada', 'bo'] })
+  expect(await svg()).toMatch(/GET READY/)
+  await clock.advance(3000)
+  expect(await alt()).toMatch(/running/)
+
+  // bo's run, as the room relays it: two batches, the second overlapping the first.
+  // bo plays 8 s, then stops pressing and is caught.
+  const bo = play(seed, 8_000)
+  for (let now = 8_000; bo.g.mode === 'running'; now += 10) advance(bo.g, now)
+  const half = Math.floor(bo.g.log.length / 2)
+  await room({ kind: 'run', name: 'bo', race: 1, run: { from: 0, moves: bo.g.log.slice(0, half), t: bo.g.log[half - 1]?.[0] ?? 0, wait: 0, paused: false, over: false } })
+  expect(await svg()).toMatch(/hue-rotate\(150deg\)/)
+  expect(await svg()).toMatch(/>bo \d+/)
+
+  // Clawd, untouched, is caught: the room hears the whole run, and the daily race nothing.
+  await clock.advance(30_000)
+  expect(await alt()).toMatch(/over/)
+  const last = said.filter(s => s.kind === 'run').at(-1)
+  expect(last).toMatchObject({ race: 1, over: true })
+  expect(asked).not.toContain('POST /run')
+
+  // bo is caught too, after the overlap is skipped: bo wins, with bo's real score.
+  const end = bo.g.mode === 'over' ? bo.g.gameAt : bo.g.simAt
+  await room({ kind: 'run', name: 'bo', race: 1, run: { from: half - 2, moves: bo.g.log.slice(half - 2), t: end, wait: 0, paused: false, over: true } })
+  await clock.advance(200)
+  expect(bo.g.mode).toBe('over')
+  expect(await alt()).toMatch(new RegExp(`Race: 1\\. bo ${bo.g.score} · 2\\. you \\d+\\.`))
+  expect(await svg()).toMatch(/BO WINS/)
+
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'room leave' }))).toMatch(/left room K7QXM/)
+  await ui.unmount()
+})

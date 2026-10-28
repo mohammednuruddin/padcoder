@@ -11,7 +11,15 @@ type Statement = {
   all<T = Row>(): Promise<{ results: T[] }>
   run(): Promise<{ meta: { changes: number } }>
 }
-type Env = { DB: { prepare(query: string): Statement } }
+type Env = {
+  DB: { prepare(query: string): Statement }
+  ROOMS: { idFromName(name: string): unknown; get(id: unknown): { fetch(request: Request): Promise<Response> } }
+}
+
+// Rooms to race friends live in, one Durable Object each.
+export { Room } from './room'
+const ROOM = /^\/rooms\/([^/]+)\/(listen|say)$/
+const CODE = /^[A-HJKMNP-Z2-9]{5}$/
 
 const LIMIT_MS = 20 * 60_000 // runs longer than this aren't ranked
 const MAX_MOVES = 20_000 // 16 presses a second for 20 minutes
@@ -42,6 +50,12 @@ class Refusal extends Error {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
+    const room = ROOM.exec(url.pathname)
+    if (room !== null) {
+      const code = (room[1] ?? '').toUpperCase()
+      if (!CODE.test(code)) return json({ error: 'A room code is 5 letters and digits.' }, 400)
+      return env.ROOMS.get(env.ROOMS.idFromName(code)).fetch(request)
+    }
     try {
       if (request.method === 'POST' && url.pathname === '/join') return await join(request, env)
       if (request.method === 'POST' && url.pathname === '/run') return await run(request, env)

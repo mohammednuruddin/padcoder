@@ -138,6 +138,22 @@ Everyone runs the same course each day (UTC), and you can race it online:
   Nothing about Claude or your work. Until you join, the mod sends nothing, except the request for the
   board when you run `/bugdash top`.
 
+### Race friends live
+- `/bugdash room` opens a room and gives you its code, five letters and digits like `K7QXM`. Friends
+  join with `/bugdash room K7QXM`. You race under your daily race name, or add one:
+  `/bugdash room K7QXM ada`. Up to four race in a room.
+- **✕** (or **Play**) starts a race for everyone in the room: a fresh course, GET READY and a count,
+  then all off together. Each friend runs as a tinted Clawd just behind yours, jumping and sliding as
+  they really do, with a live scoreboard under your score. The last one standing wins.
+- Each run's moves go to the room as you play, and every player's band plays them again with the
+  game's own rules, so what you see of a friend is their run, on the same course, as it happens.
+- Room races don't count in the daily race. If Claude needs you mid-race your run pauses, and your
+  friends see you stop.
+- The room is listened to only while the band shows, and it closes after 10 minutes without a race.
+  `/bugdash room` again shows who is in it, and `/bugdash room leave` leaves.
+- Names in a room aren't checked as the daily race's are: rooms are for friends. What is sent, to the
+  same server: your name and each room run's moves.
+
 ### Install Bug Dash
 At the prompt of a Claude Code terminal session:
 
@@ -243,6 +259,8 @@ Actions:
 | `mods/bug-dash/hooks/register.tsx` | The mod's hooks: the band, `/bugdash`, the pad's signals, the race's requests |
 | `mods/bug-dash/hooks/race.ts` | What goes to the race server and how its answers are read |
 | `server/src/index.ts` | The race server: joining, the daily board and ghosts, replaying runs, medals |
+| `server/src/room.ts` | A room to race friends live in: one Durable Object per room code |
+| `mods/bug-dash/hooks/room.ts` | Room codes, listening to a room, and reading what it says |
 
 ## Troubleshooting
 The log is at `~/Library/Logs/PadCoder.log` (🎮 → Open Log). It records button presses,
