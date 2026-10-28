@@ -41,6 +41,22 @@ const STALE_MS = 10 * 60_000
 
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
+// Sound, from sounds/: on unless /bugdash sound or Mute turns it off.
+let sound = true
+const play = ($: EngineInterface, clip: string) => {
+  if (sound) void $.audio.play({ asset: `sounds/${clip}.wav` }, { gain: 0.5 }).catch(() => undefined)
+}
+// The rules' pops (a token, a smash, a double jump, a level) already heard;
+// each kind has a clip of its name.
+const heard = new WeakSet<object>()
+function listenTo($: EngineInterface, now: number) {
+  for (const pop of game.pops) {
+    if (heard.has(pop)) continue
+    heard.add(pop)
+    if (now - pop.wall < 250) play($, pop.kind)
+  }
+}
+
 // Sleeps until the run can next change (a bug reaching Clawd, a speed-up),
 // so nothing ticks between events; a crash rumbles the pad and keeps a best.
 async function settle($: EngineInterface) {
@@ -48,6 +64,7 @@ async function settle($: EngineInterface) {
   timer = undefined
   if (game.crash !== null && game.crash !== lastCrash) {
     lastCrash = game.crash
+    play($, 'caught')
     // Taken before anything awaits, so a quick restart can't swap the run.
     if (player !== undefined) void submit($, player, { day: runDay, moves: game.log.slice(), score: game.score })
     post($, THUD)
@@ -97,8 +114,21 @@ async function refresh($: EngineInterface) {
 
 async function wake($: EngineInterface) {
   timer = undefined
-  if (advance(game, await $.clock.now()) !== 'none') redraw($)
+  const now = await $.clock.now()
+  if (advance(game, now) !== 'none') redraw($)
+  listenTo($, now)
   await settle($)
+}
+
+// What a press that took sounds like: a run starting, the count after a
+// resume, or the move itself (a double jump is heard from its pop).
+function soundOf($: EngineInterface, signal: Signal, was: string, now: number) {
+  if (game.mode !== 'running') return
+  if (was === 'ready' || was === 'over') play($, 'start')
+  else if (was === 'paused') play($, 'count')
+  else if (signal === 'slide' || signal === 'dash') play($, signal)
+  else if (signal === 'jump' && !game.pops.some(pop => pop.kind === 'double' && !heard.has(pop))) play($, 'jump')
+  listenTo($, now)
 }
 
 async function handle($: EngineInterface, signal: Signal) {
@@ -109,7 +139,10 @@ async function handle($: EngineInterface, signal: Signal) {
     if (now - raceAt > STALE_MS) void refresh($)
     if (signal === 'on') {
       padPlays = true
-      if (game.mode === 'paused') changed = act(game, 'jump', now)
+      if (game.mode === 'paused' && act(game, 'jump', now)) {
+        changed = true
+        soundOf($, 'jump', 'paused', now)
+      }
     }
   } else if (signal === 'off' || signal === 'hide') {
     changed = pause(game, now, signal === 'off' ? 'pad' : 'hidden')
@@ -129,7 +162,9 @@ async function handle($: EngineInterface, signal: Signal) {
       if (race !== undefined) race = { ...race, sent: undefined }
       if (player !== undefined && raceDay !== runDay) void refresh($)
     }
+    const was = game.mode
     changed = act(game, signal, now)
+    if (changed) soundOf($, signal, was, now)
   }
   if (changed) redraw($)
   await settle($)
@@ -138,6 +173,13 @@ async function handle($: EngineInterface, signal: Signal) {
 async function stop($: EngineInterface, why: PauseReason) {
   if (pause(game, await $.clock.now(), why)) redraw($)
   await settle($)
+}
+
+async function toggleSound($: EngineInterface) {
+  sound = !sound
+  await $.store.set('sound', sound)
+  redraw($)
+  return sound ? 'Bug Dash has sound again.' : 'Bug Dash is muted. /bugdash sound brings it back.'
 }
 
 async function joinRace($: EngineInterface, name: string) {
@@ -188,6 +230,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'bugdash', description: 'Show or hide Bug Dash, a runner to play above the prompt while Claude works' })
     const saved = await $.store.get('best')
     if (typeof saved === 'number') game.best = Math.max(game.best, saved)
+    sound = (await $.store.get('sound')) !== false
     const kept = (await $.store.get('player')) as Partial<Player> | undefined
     if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
     void listen($)
@@ -210,7 +253,8 @@ export const register: Register = on => {
       return { text: `Bug Dash no longer sends runs from here. The name ${left} stays taken.` }
     }
     if (word === 'top') return { text: await topText($) }
-    if (word !== '') return { text: 'Use /bugdash to show or hide it, /bugdash join <name> to race online, /bugdash top for the board, /bugdash leave to stop.' }
+    if (word === 'sound') return { text: await toggleSound($) }
+    if (word !== '') return { text: 'Use /bugdash to show or hide it, /bugdash join <name> to race online, /bugdash top for the board, /bugdash leave to stop, /bugdash sound to mute or unmute it.' }
     const showing = !(await read($, shown))
     await handle($, showing ? 'show' : 'hide')
     return {
@@ -271,6 +315,7 @@ export const register: Register = on => {
         <Svg source={drawScene(game, view, now)} alt={sceneAlt(game, view)} />
         <Box position="absolute" top={0} right={0} flexDirection="row" gap={1}>
           {controls}
+          <Button key="sound" label={sound ? 'Mute' : 'Unmute'} hotkey="m" dimColor onPress={() => void toggleSound($)} />
           <Button key="hide" label="Hide" hotkey="h" dimColor onPress={press('hide')} />
         </Box>
         {beneath}

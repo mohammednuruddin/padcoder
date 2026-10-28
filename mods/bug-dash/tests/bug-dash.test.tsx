@@ -52,6 +52,47 @@ test('/bugdash puts the game above the prompt: it runs, crashes, and pauses when
   await ui.unmount()
 })
 
+test('sound: a start, each move, the count after a resume, getting caught, and Mute', async ($, on) => {
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'bugdash' } }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="core" />
+  })
+  mock.store(on)
+  const clock = mock.clock(on)
+  const heard: string[] = []
+  on('audio.play', (_, e) => {
+    heard.push(e.clip.asset?.replace(/^sounds\/|\.wav$/g, '') ?? '')
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await $.command.run(BUGDASH)
+
+  await ui.press({ key: 'play' })
+  await clock.advance(200)
+  await ui.press({ key: 'jump' })
+  await clock.advance(150)
+  await ui.press({ key: 'jump' })
+  await clock.advance(800)
+  await ui.press({ key: 'slide' })
+  await ui.press({ key: 'dash' })
+  await ui.press({ key: 'pause' })
+  await ui.press({ key: 'play' })
+  await clock.advance(30_000)
+  expect(heard.slice(0, 6)).toEqual(['start', 'jump', 'double', 'slide', 'dash', 'count'])
+  expect(heard).toContain('caught')
+
+  heard.length = 0
+  await ui.press({ key: 'sound' })
+  await ui.press({ key: 'play' })
+  await clock.advance(200)
+  await ui.press({ key: 'jump' })
+  expect(heard).toEqual([])
+  await ui.unmount()
+})
+
 test('the terminal has no SVG, so the band is left to the rest', async ($, on) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'bugdash' } }))

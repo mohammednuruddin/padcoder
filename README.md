@@ -101,6 +101,8 @@ grabbing ✦ tokens.
   (in the air it dives) · **□ / R1 / R2** dash through anything, using one of three charges ·
   **Options** pauses. No pad? Click **Play** on the band, then use w, s, d and p.
 - A token is 25 points, clearing a bug or a banner 10, and smashing a bug mid-dash 15. Your best is kept.
+- Chiptune sounds for each move, tokens, level-ups and getting caught. **Mute** on the band, or
+  `/bugdash sound`, turns them off and on.
 - Every 9 seconds is a new level. The world speeds up and the long gaps close in, and combos come in
   as you go: a bug then a banner from level 4, a banner then a bug from level 6, three bugs from level 9
   and two banners from level 12. Points count double from level 5, triple from level 9 and so on. It
