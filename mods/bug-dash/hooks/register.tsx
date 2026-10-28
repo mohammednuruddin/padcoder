@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
 import { EARNED_BY, SERVER, asked, boardOf, boardPath, hasSkin, joined, medalsFrom, medalsOf, medalsPath, runBody, sentOf, type Answer, type Medals, type Player } from './race'
-import { LATE_MS, SKINS, act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race, type Skin } from './scene'
+import { FINAL_MS, SKINS, act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race, type Skin } from './scene'
 
 type Signal = Action | 'on' | 'off' | 'show' | 'hide'
 
@@ -78,14 +78,15 @@ async function play($: EngineInterface, clip: string, here = false) {
     }
     await $.store.set('soundOwner', { id: ME, at: now })
     mineAt = now
-    if (here) post($, SOUND)
-    else {
+    if (!here) {
       await new Promise<void>(resolve => $.clock.after(SETTLE_MS, resolve))
       if ((await ownerOf($))?.id !== ME) {
         mineAt = undefined
         return
       }
     }
+    // Any session that thought it held the sound lets go.
+    post($, SOUND)
   } else if (now - (mineAt ?? 0) > RENEW_MS) {
     await $.store.set('soundOwner', { id: ME, at: now })
     mineAt = now
@@ -169,14 +170,15 @@ async function refresh($: EngineInterface) {
   await medalsFor($, now)
 }
 
-// The player's medals, fetched again only once another day is final (a day's
-// late runs are in LATE_MS after it ends), and kept for when the race can't
-// be reached.
+// The player's medals, fetched again only once another day is final, and
+// kept for when the race can't be reached. An answer for a name left
+// meanwhile is dropped.
 async function medalsFor($: EngineInterface, now: number) {
-  const day = dayOf(now - LATE_MS)
-  if (player === undefined || medalsDay === day) return
-  const got = medalsOf(await call($, medalsPath(player.name)))
-  if (got === undefined) return
+  const day = dayOf(now - FINAL_MS)
+  const who = player
+  if (who === undefined || medalsDay === day) return
+  const got = medalsOf(await call($, medalsPath(who.name)))
+  if (got === undefined || player !== who) return
   medals = got
   medalsDay = day
   await $.store.set('medals', got)
@@ -224,6 +226,8 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
   let changed = false
   if (signal === 'on' || signal === 'show') {
     await update($, shown, () => true)
+    // Whatever was posted before this session listened.
+    void syncSound($)
     if (now - raceAt > STALE_MS) void refresh($)
     if (signal === 'on') {
       padPlays = true

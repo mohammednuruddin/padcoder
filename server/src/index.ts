@@ -1,7 +1,7 @@
 // Bug Dash's daily race: today's leaderboard and ghosts, and runs checked by
 // playing them again with the game's own rules, so a score can't be made up.
 
-import { LATE_MS, RULES_VERSION, dayOf, daySeed, replay, type Move } from '../../mods/bug-dash/hooks/scene'
+import { FINAL_MS, LATE_MS, RULES_VERSION, dayOf, daySeed, replay, type Move } from '../../mods/bug-dash/hooks/scene'
 
 // The little of D1 this uses.
 type Row = Record<string, unknown>
@@ -98,20 +98,21 @@ async function board(env: Env, day: string, name: string | null) {
   return { day, rules: RULES_VERSION, total: count?.total ?? 0, top, you, ghosts }
 }
 
-// How many final days (whose late runs are in) `name` won, ended in the top
-// three, and ended in the top ten, on any rules' board: what earns skins.
-// Only the player's own runs are looked at, each counting the runs ahead of
-// it on its board, through the indexes.
+// How many final days `name` won, ended in the top three, and ended in the
+// top ten, on any rules' board: what earns skins. Only the player's own runs
+// are looked at, each counting the runs ahead of it on its board through the
+// indexes, once (MATERIALIZED, so the three tallies don't count again).
 async function medals(env: Env, name: string) {
   if (!NAME.test(name)) throw new Refusal(400, 'A name is 2 to 16 letters, digits, _ or -.')
   const row = await env.DB.prepare(
-    `SELECT COUNT(CASE WHEN ahead < 1 THEN 1 END) AS gold, COUNT(CASE WHEN ahead < 3 THEN 1 END) AS silver, COUNT(CASE WHEN ahead < ? THEN 1 END) AS copper FROM (
+    `WITH places AS MATERIALIZED (
        SELECT (SELECT COUNT(*) FROM runs o WHERE o.day = m.day AND o.rules = m.rules
                  AND (o.score > m.score OR (o.score = m.score AND (o.at < m.at OR (o.at = m.at AND o.key < m.key))))) AS ahead
        FROM runs m WHERE m.key = ? AND m.day < ?
-     )`,
+     )
+     SELECT COUNT(CASE WHEN ahead < 1 THEN 1 END) AS gold, COUNT(CASE WHEN ahead < 3 THEN 1 END) AS silver, COUNT(CASE WHEN ahead < ? THEN 1 END) AS copper FROM places`,
   )
-    .bind(TOP, name.toLowerCase(), dayOf(Date.now() - LATE_MS))
+    .bind(name.toLowerCase(), dayOf(Date.now() - FINAL_MS), TOP)
     .first<{ gold: number; silver: number; copper: number }>()
   return { name, gold: row?.gold ?? 0, silver: row?.silver ?? 0, copper: row?.copper ?? 0 }
 }

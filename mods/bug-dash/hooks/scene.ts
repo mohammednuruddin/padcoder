@@ -62,9 +62,11 @@ export const RULES_VERSION = 2
 const STEP_MS = 4
 export const WIDEST = 1400 // the widest band drawn
 export const LIMIT_MS = 20 * 60_000 // the longest run the race ranks
-// A run of a day's course may still be sent this long after the day ends;
-// then the day's board is final, and its medals are given.
+// A run of a day's course may still be sent this long after the day ends,
+// and the day's board is final, its medals given, once any run sent then
+// has been checked and kept.
 export const LATE_MS = 30 * 60_000
+export const FINAL_MS = LATE_MS + 5 * 60_000
 const GHOSTS = 2
 const AHEAD = 2 * WIDEST // course is laid out at least this far ahead
 const WORLD_MS = 20000 // how long one drawing's scroll runs on
