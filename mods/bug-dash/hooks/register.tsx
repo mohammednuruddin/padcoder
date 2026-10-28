@@ -292,7 +292,7 @@ async function listenRoom($: EngineInterface) {
   const here = room
   if (here === undefined || here.stop !== undefined) return
   const base = await serverOf($)
-  if (base === '' || room !== here || here.stop !== undefined) return
+  if (base === '' || room !== here || here.stop !== undefined || !(await read($, shown))) return
   here.state = 'joining'
   redraw($)
   const stream = $.process.spawn({ argv: listenArgv(base, here.code, here.name, here.secret) })
@@ -331,13 +331,15 @@ async function listenRoom($: EngineInterface) {
   }
 }
 
-// Stops listening to the room, and tells it so it lets the name go at once.
-function quitRoom($: EngineInterface, here: Room) {
+// Stops listening to the room. Leaving it (`bye`) tells it, so it lets the name
+// go and ends this run in its race at once; a hidden band only steps away, its
+// place kept for its secret.
+function quitRoom($: EngineInterface, here: Room, bye: boolean) {
   here.retry?.cancel()
   here.retry = undefined
-  if (here.stop === undefined) return
-  here.stop()
-  if (here.secret !== undefined) void call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'bye' })
+  here.stop?.()
+  if (bye && here.secret !== undefined) void call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'bye' })
+  if (bye) here.secret = undefined
 }
 
 async function onHeard($: EngineInterface, here: Room, h: Exclude<Heard, { kind: 'bye' }>) {
@@ -368,7 +370,7 @@ async function onHeard($: EngineInterface, here: Room, h: Exclude<Heard, { kind:
       return
     case 'left':
       here.others = here.others.filter(name => name !== h.name)
-      rivalGone(game, h.name)
+      if (h.gone) rivalGone(game, h.name)
       redraw($)
       return
     case 'skip':
@@ -377,7 +379,7 @@ async function onHeard($: EngineInterface, here: Room, h: Exclude<Heard, { kind:
     case 'start': {
       // A run under way plays on, and sits the race out; everyone else is off together.
       if (game.mode === 'running' || game.mode === 'paused') {
-        if (here.secret !== undefined) void call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'skip' })
+        void sitOut($, here, h.race)
         return
       }
       const at = h.at - here.offset
@@ -397,7 +399,10 @@ async function onHeard($: EngineInterface, here: Room, h: Exclude<Heard, { kind:
       return
     }
     case 'run':
-      if (h.race === here.race && h.name !== here.name && rivalRun(game, h.name, h.run, now)) nudge($)
+      if (h.race !== here.race || h.name === here.name || !rivalRun(game, h.name, h.run, now)) return
+      nudge($)
+      // Caught here, with a rival back in the race: the slow wake keeps them moving.
+      if (timer === undefined && game.mode !== 'running') await settle($)
       return
   }
 }
@@ -430,9 +435,20 @@ async function sendRun($: EngineInterface) {
   if (!took && here.fails++ < FAILS) here.again = true
   await new Promise<void>(resolve => $.clock.after(BATCH_MS, resolve))
   here.sending = false
-  if (here.again) {
+  // Sent again only while still in this room and listened to.
+  if (here.again && room === here && here.secret !== undefined) {
     here.again = false
     void sendRun($)
+  }
+}
+
+// Busy with a run of its own, this session sits race `raceId` out, trying a
+// few times so the room doesn't wait on it.
+async function sitOut($: EngineInterface, here: Room, raceId: number) {
+  for (let tries = 0; tries < FAILS && room === here && here.secret !== undefined; tries++) {
+    const answer = await call($, sayPath(here.code), { name: here.name, secret: here.secret, kind: 'skip', race: raceId })
+    if (answer !== undefined && answer.status < 500) return
+    await new Promise<void>(resolve => $.clock.after(RETRY_MS, resolve))
   }
 }
 
@@ -450,7 +466,7 @@ async function roomCommand($: EngineInterface, word: string, given: string) {
   if (word.toLowerCase() === 'leave') {
     if (room === undefined) return 'You are not in a room.'
     const left = room.code
-    quitRoom($, room)
+    quitRoom($, room, true)
     room = undefined
     redraw($)
     return `You left room ${left}.`
@@ -463,7 +479,7 @@ async function roomCommand($: EngineInterface, word: string, given: string) {
   const name = given || player?.name || ''
   if (!NAME.test(name)) return 'Race under a name: /bugdash room <code> <name>, 2 to 16 letters, digits, _ or -. Your daily race name is used if you have one.'
   if ((await serverOf($)) === '') return "The race server isn't up yet."
-  if (room !== undefined) quitRoom($, room)
+  if (room !== undefined) quitRoom($, room, true)
   room = { code, name, others: [], state: 'joining', offset: 0, sent: 0, sending: false, again: false, tries: 0, fails: 0 }
   await handle($, 'show')
   return word === ''
@@ -516,8 +532,8 @@ async function handle($: EngineInterface, signal: Signal, from: 'pad' | 'here' =
     if (changed && roomRun) void sendRun($)
     if (signal === 'hide') {
       await update($, shown, () => false)
-      // A hidden band leaves the room's stream; showing it joins again.
-      if (room !== undefined) quitRoom($, room)
+      // A hidden band steps away from the room's stream; showing it comes back.
+      if (room !== undefined) quitRoom($, room, false)
       // Hiding the run the pad plays hands the pad back to Claude, which
       // pauses the copies in other sessions too; a run shown with /bugdash
       // alone leaves the pad be.

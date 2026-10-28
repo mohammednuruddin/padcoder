@@ -29,7 +29,8 @@ export type RaceOn = { readonly race: number; readonly seed: number; readonly at
 // out, or the room closing the stream.
 export type Heard =
   | { readonly kind: 'hello'; readonly secret: string; readonly now: number; readonly members: readonly string[]; readonly race?: RaceOn }
-  | { readonly kind: 'joined' | 'left'; readonly name: string }
+  | { readonly kind: 'joined'; readonly name: string }
+  | { readonly kind: 'left'; readonly name: string; readonly gone: boolean }
   | { readonly kind: 'skip'; readonly name: string; readonly race: number }
   | { readonly kind: 'start'; readonly race: number; readonly seed: number; readonly at: number; readonly names: readonly string[] }
   | { readonly kind: 'run'; readonly name: string; readonly race: number; readonly run: RivalRun }
@@ -61,8 +62,9 @@ export function heard(line: string): Heard | undefined {
     case 'skip':
       return isText(d.name) && isNumber(d.race) ? { kind: 'skip', name: d.name, race: d.race } : undefined
     case 'joined':
+      return isText(d.name) ? { kind: 'joined', name: d.name } : undefined
     case 'left':
-      return isText(d.name) ? { kind: d.kind, name: d.name } : undefined
+      return isText(d.name) ? { kind: 'left', name: d.name, gone: d.gone === true } : undefined
     case 'start':
       return isNumber(d.race) && isNumber(d.seed) && isNumber(d.at) && isNames(d.names) ? { kind: 'start', race: d.race, seed: d.seed, at: d.at, names: d.names } : undefined
     case 'run': {

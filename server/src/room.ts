@@ -11,13 +11,15 @@ const ACTIONS: ReadonlySet<unknown> = new Set(['jump', 'slide', 'dash'])
 const START_MS = 3000 // a race starts this long after it's called, for everyone to hear of it
 const IDLE_MS = 10 * 60_000 // with no race on, streams close this long after the last race or join
 const PING_MS = 45_000 // a comment down every stream, inside the edge's 100 s idle limit
+const RACER_MS = 5 * 60_000 // a racer silent this long (paused, or away) holds no race open
 const MAX_SAY = 16_000
 const MAX_BATCH = 400
 const SAYS_PER_SECOND = 10
 
 type Member = { readonly name: string; readonly secret: string; readonly writer: WritableStreamDefaultWriter<Uint8Array>; said: number[] }
-// A racer's run as the room has it: every move so far, and where it stands.
-type Racer = { readonly name: string; moves: Move[]; t: number; wait: number; paused: boolean; over: boolean }
+// A racer's run as the room has it: every move so far, where it stands, and
+// when the room last heard of it.
+type Racer = { readonly name: string; moves: Move[]; t: number; wait: number; paused: boolean; over: boolean; heard: number }
 
 const encoder = new TextEncoder()
 const json = (value: unknown, status = 200) =>
@@ -41,9 +43,10 @@ export class Room {
     return json({ error: 'Nothing here.' }, 404)
   }
 
-  // Whether a race is on: someone in it not caught yet, and not past its limit.
+  // Whether a race is on: someone in it not caught yet, and heard of lately.
   private racing() {
-    return Date.now() - this.at < LIMIT_MS + START_MS && [...this.racers.values()].some(r => !r.over)
+    const now = Date.now()
+    return [...this.racers.values()].some(r => !r.over && now - r.heard < RACER_MS)
   }
 
   // Opens a member's stream: hello first, with the secret that signs what
@@ -99,7 +102,7 @@ export class Room {
         this.at = now + START_MS
         this.activeAt = now
         this.racers.clear()
-        for (const m of this.members.values()) this.racers.set(m.name.toLowerCase(), { name: m.name, moves: [], t: 0, wait: 0, paused: false, over: false })
+        for (const m of this.members.values()) this.racers.set(m.name.toLowerCase(), { name: m.name, moves: [], t: 0, wait: 0, paused: false, over: false, heard: this.at })
         this.broadcast({ kind: 'start', race: this.race, seed: this.seed, at: this.at, names: [...this.members.values()].map(m => m.name) })
         return new Response(null, { status: 204 })
       }
@@ -112,22 +115,22 @@ export class Room {
           Array.isArray(moves) && moves.length <= MAX_BATCH &&
           moves.every(m => Array.isArray(m) && m.length === 2 && Number.isInteger(m[0]) && ACTIONS.has(m[1])) &&
           typeof t === 'number' && Number.isFinite(t) && typeof wait === 'number' && wait >= 0 && wait <= 5000
-        if (!ok) return json({ error: 'That run makes no sense.' }, 400)
+        if (!ok || (t as number) > LIMIT_MS) return json({ error: 'That run makes no sense.' }, 400)
         // Moves the room has already are skipped; a batch sent again is harmless.
         const fresh = (moves as Move[]).slice(racer.moves.length - (from as number))
         racer.moves.push(...fresh)
-        Object.assign(racer, { t, wait, paused: said.paused === true, over: said.over === true })
+        Object.assign(racer, { t, wait, paused: said.paused === true, over: said.over === true, heard: now })
         this.activeAt = now
         this.broadcast({ kind: 'run', name: member.name, race, run: { from, moves, t: racer.t, wait: racer.wait, paused: racer.paused, over: racer.over } }, member)
         return new Response(null, { status: 204 })
       }
       case 'skip': {
-        // Busy with a run of their own: out of this race.
-        if (this.racers.delete(key)) this.broadcast({ kind: 'skip', name: member.name, race: this.race })
+        // Busy with a run of their own: out of the race they name.
+        if (said.race === this.race && this.racers.delete(key)) this.broadcast({ kind: 'skip', name: member.name, race: this.race })
         return new Response(null, { status: 204 })
       }
       case 'bye':
-        this.drop(member)
+        this.drop(member, true)
         return new Response(null, { status: 204 })
     }
     return json({ error: 'Say start, run, skip or bye.' }, 400)
@@ -141,16 +144,16 @@ export class Room {
     for (const member of this.members.values()) if (member !== except) this.send(member, event)
   }
 
-  // A member gone: said bye, or their stream won't take a write. Out of the
-  // race too, where they stand.
-  private drop(member: Member) {
+  // A member gone: their stream won't take a write, and they may be back with
+  // their secret; or they said bye (`gone`), which ends their run where it stands.
+  private drop(member: Member, gone = false) {
     const key = member.name.toLowerCase()
     if (this.members.get(key) !== member) return
     this.members.delete(key)
     member.writer.close().catch(() => undefined)
     const racer = this.racers.get(key)
-    if (racer !== undefined) racer.over = true
-    this.broadcast({ kind: 'left', name: member.name })
+    if (racer !== undefined && gone) racer.over = true
+    this.broadcast({ kind: 'left', name: member.name, gone })
     this.quiet()
   }
 
@@ -168,10 +171,10 @@ export class Room {
     this.quiet()
   }
 
+  // Nobody listening: no pings. The race stays, for whoever comes back.
   private quiet() {
     if (this.members.size > 0 || this.ping === undefined) return
     clearInterval(this.ping)
     this.ping = undefined
-    this.racers.clear()
   }
 }

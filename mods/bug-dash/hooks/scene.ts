@@ -510,7 +510,8 @@ export function rivalGone(g: Game, name: string) {
   const rival = g.rivals.find(r => r.name === name)
   if (rival === undefined || rival.over) return false
   rival.over = true
-  rival.known = rival.shown
+  // They fall where their run had got to.
+  rival.known = { ...rival.shown, gameAt: rival.shown.simAt }
   return true
 }
 export function rivalOut(g: Game, name: string) {
