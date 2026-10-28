@@ -59,10 +59,12 @@ export function boardOf(answer: Answer | undefined): Board | undefined {
   }
 }
 
-// Where a run sent put the player.
+// Where a run sent put the player, or why the race turned it away.
 export function sentOf(answer: Answer | undefined): Sent {
-  if (answer === undefined || answer.status !== 200) return 'failed'
+  if (answer === undefined) return 'failed'
   const data = fields(answer)
+  if (answer.status >= 400 && answer.status < 500 && isText(data.error)) return { refused: data.error.slice(0, 80) }
+  if (answer.status !== 200) return 'failed'
   return isNumber(data.rank) && isNumber(data.total) && isNumber(data.best) ? { rank: data.rank, total: data.total, best: data.best } : 'failed'
 }
 

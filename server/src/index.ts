@@ -14,6 +14,9 @@ type Statement = {
 type Env = { DB: { prepare(query: string): Statement } }
 
 const LIMIT_MS = 20 * 60_000 // runs longer than this aren't ranked
+// A run of a day's course may still come in this long after the day ends;
+// then the day's board is final.
+const LATE_MS = 30 * 60_000
 const MAX_MOVES = 20_000 // 16 presses a second for 20 minutes
 const MAX_BODY = 600_000
 const MAX_TRIES = 300 // runs a player may send in a day
@@ -48,7 +51,7 @@ export default {
       const day = /^\/day\/([^/]+)$/.exec(url.pathname)?.[1]
       if (request.method === 'GET' && day !== undefined) return json(await board(env, day, url.searchParams.get('name')))
       const name = /^\/medals\/([^/]+)$/.exec(url.pathname)?.[1]
-      if (request.method === 'GET' && name !== undefined) return json(await medals(env, decodeURIComponent(name)))
+      if (request.method === 'GET' && name !== undefined) return json(await medals(env, name))
       throw new Refusal(404, 'Nothing here.')
     } catch (error) {
       if (error instanceof Refusal) return json({ error: error.message }, error.status)
@@ -98,7 +101,7 @@ async function board(env: Env, day: string, name: string | null) {
   return { day, rules: RULES_VERSION, total: count?.total ?? 0, top, you, ghosts }
 }
 
-// How many finished days (before today, in UTC) `name` won, ended in the top
+// How many final days (whose late runs are in) `name` won, ended in the top
 // three, and ended in the top ten, on any rules' board: what earns skins.
 async function medals(env: Env, name: string) {
   if (!NAME.test(name)) throw new Refusal(400, 'A name is 2 to 16 letters, digits, _ or -.')
@@ -107,7 +110,7 @@ async function medals(env: Env, name: string) {
        SELECT key, ROW_NUMBER() OVER (PARTITION BY day, rules ORDER BY score DESC, at ASC) AS place FROM runs WHERE day < ?
      ) WHERE key = ? AND place <= ?`,
   )
-    .bind(dayOf(Date.now()), name.toLowerCase(), TOP)
+    .bind(dayOf(Date.now() - LATE_MS), name.toLowerCase(), TOP)
     .first<{ gold: number; silver: number; copper: number }>()
   return { name, gold: row?.gold ?? 0, silver: row?.silver ?? 0, copper: row?.copper ?? 0 }
 }
@@ -122,7 +125,7 @@ async function run(request: Request, env: Env) {
   if (sent.rules !== RULES_VERSION) throw new Refusal(409, 'This Bug Dash is out of date: update it to race online.')
   const { day, name, token, moves } = sent
   const now = Date.now()
-  if (typeof day !== 'string' || (day !== dayOf(now) && day !== dayOf(now - 86_400_000))) throw new Refusal(409, 'That day is over.')
+  if (typeof day !== 'string' || (day !== dayOf(now) && day !== dayOf(now - LATE_MS))) throw new Refusal(409, 'That day is over.')
   if (typeof name !== 'string' || typeof token !== 'string' || !NAME.test(name)) throw new Refusal(401, 'Join first.')
   const key = name.toLowerCase()
   const player = await env.DB.prepare('SELECT name, token_hash FROM players WHERE key = ?').bind(key).first<{ name: string; token_hash: string }>()

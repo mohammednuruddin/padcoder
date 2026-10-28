@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { sentOf } from '../hooks/race'
 import { LIMIT_MS, RULES_VERSION, act, advance, dayOf, daySeed, distAt, gameTime, gateHeight, multiplier, newGame, nextWake, replay, setGhosts, speedAt, type Game, type Move } from '../hooks/scene'
 
 const BAND = {
@@ -255,6 +256,8 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
   // Not joined: a whole run, and not a word to the server; no metal to wear.
   await $.command.run(BUGDASH)
   expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin silver' }))).toMatch(/earned in the daily race: end a day in the top three/)
+  // The ready card's hint names <name>, escaped so the drawing stays whole.
+  expect(await svg()).toMatch(/join &#60;name&#62; to race/)
   await ui.press({ key: 'play' })
   await clock.advance(1_500)
   await ui.press({ key: 'jump' })
@@ -298,8 +301,9 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
   expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin silver' }))).toMatch(/Clawd wears silver/)
   expect(await svg()).toMatch(/\.pc\{fill:#b4bec9\}/)
 
-  // Left: runs stay here again.
+  // Left: runs stay here again, and the medals and skin go with the name.
   await $.command.run({ ...BUGDASH, args: 'leave' })
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin' }))).toMatch(/clay: wearing.*silver: end a day in the top three/)
   const before = asked.length
   await clock.advance(15_000)
   expect(asked.length).toBe(before)
@@ -458,4 +462,10 @@ test('the run only wakes the engine while it is running', () => {
   expect(nextWake(g, 60)).toBeUndefined()
   const frozen = gameTime(g, 60)
   expect(gameTime(g, 9000)).toBe(frozen)
+})
+
+test("a run the race turns away says why, not that the race couldn't be reached", () => {
+  expect(sentOf({ status: 409, text: JSON.stringify({ error: 'This Bug Dash is out of date: update it to race online.' }) })).toEqual({ refused: 'This Bug Dash is out of date: update it to race online.' })
+  expect(sentOf({ status: 503, text: 'busy' })).toBe('failed')
+  expect(sentOf(undefined)).toBe('failed')
 })

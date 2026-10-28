@@ -126,8 +126,8 @@ export type Race = {
   readonly top: readonly { readonly name: string; readonly score: number }[]
   readonly total: number
   readonly you?: { readonly rank: number; readonly score: number }
-  // The last run sent: on its way, lost, or where it put the player.
-  readonly sent?: 'sending' | 'failed' | { readonly rank: number; readonly total: number; readonly best: number }
+  // The last run sent: on its way, lost, turned away and why, or where it put the player.
+  readonly sent?: 'sending' | 'failed' | { readonly refused: string } | { readonly rank: number; readonly total: number; readonly best: number }
 }
 
 // What Clawd wears: clay to start, and metals placing in the daily race earns.
@@ -683,6 +683,7 @@ function sentText(race: Race | undefined) {
   if (sent === undefined) return undefined
   if (sent === 'sending') return 'Sending your run'
   if (sent === 'failed') return "Couldn't reach the race"
+  if ('refused' in sent) return sent.refused.replace(/\.$/, '')
   return `#${sent.rank} of ${sent.total} today · best ${sent.best}`
 }
 
@@ -1249,8 +1250,8 @@ function card(g: Game, view: View, width: number, now: number) {
     `${flash}<rect class="veil" width="${width}" height="${HEIGHT}"/>` +
     `<g${intro}><rect class="card" x="${x}" y="11" width="${w}" height="62" rx="11"/>` +
     `<text x="${cx}" y="33" text-anchor="middle" font-size="15" font-weight="800" letter-spacing="3" fill="url(#title)" ${FONT}>${title}</text>` +
-    `<text x="${cx}" y="50" text-anchor="middle" font-size="9.5" class="txt" ${FONT}>${line}</text>` +
-    `<text x="${cx}" y="64" text-anchor="middle" font-size="8.5" class="dim" ${FONT}>${foot}</text></g>`
+    `<text x="${cx}" y="50" text-anchor="middle" font-size="9.5" class="txt" ${FONT}>${esc(line)}</text>` +
+    `<text x="${cx}" y="64" text-anchor="middle" font-size="8.5" class="dim" ${FONT}>${esc(foot)}</text></g>`
   )
 }
 
