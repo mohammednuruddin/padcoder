@@ -62,6 +62,9 @@ export const RULES_VERSION = 2
 const STEP_MS = 4
 export const WIDEST = 1400 // the widest band drawn
 export const LIMIT_MS = 20 * 60_000 // the longest run the race ranks
+// A run of a day's course may still be sent this long after the day ends;
+// then the day's board is final, and its medals are given.
+export const LATE_MS = 30 * 60_000
 const GHOSTS = 2
 const AHEAD = 2 * WIDEST // course is laid out at least this far ahead
 const WORLD_MS = 20000 // how long one drawing's scroll runs on
@@ -447,7 +450,8 @@ const lifetime = (pop: Pop) => (pop.kind === 'level' ? LEVEL_POP_MS : POP_MS)
 // the course the same way.
 function runTo(g: Game, end: number, now: number): 'none' | 'changed' | 'over' {
   if (g.mode !== 'running') return 'none'
-  let changed = false
+  // A magnet running out takes its icon off the HUD.
+  let changed = g.simAt < g.magnetUntil && g.magnetUntil <= end
   for (let t = g.simAt + STEP_MS; t <= end; t += STEP_MS) {
     g.simAt = t
     const d = distAt(t)

@@ -22,3 +22,6 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE INDEX IF NOT EXISTS runs_board ON runs (day, rules, score DESC, at);
+
+-- A player's runs, day by day: what their medals are counted from.
+CREATE INDEX IF NOT EXISTS runs_player ON runs (key, day);

@@ -94,14 +94,25 @@ test('sound: a start, each move, the count after a resume, getting caught, and M
   await ui.unmount()
 })
 
-test("with another session's band owning the sound, the pad's moves stay quiet here; a press here takes it over", async ($, on) => {
+test("with another session's band owning the sound, the pad's moves stay quiet here; a press here takes it over; another's Mute holds here", async ($, on) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'bugdash' } }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box key="core" />
   })
-  mock.store(on, { soundOwner: { id: 'another-session', at: 0 } })
+  // The store all sessions share, which the other session writes to here.
+  const shared = new Map<string, unknown>([['soundOwner', { id: 'another-session', at: 0 }]])
+  on('store.get', (_, e) => ({ value: shared.get(e.key) }))
+  on('store.set', (_, e) => {
+    shared.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    shared.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...shared.keys()] }))
   const clock = mock.clock(on)
   const heard: string[] = []
   on('audio.play', (_, e) => {
@@ -114,7 +125,7 @@ test("with another session's band owning the sound, the pad's moves stay quiet h
     for (;;) {
       for (let line = lines.shift(); line !== undefined; line = lines.shift()) {
         if (line === 'end') return { value: { code: 0, signal: null } }
-        yield { stream: 'stdout' as const, text: `com.padcoder.game.${line}\n` }
+        yield { stream: 'stdout' as const, text: `${line.startsWith('com.') ? line : `com.padcoder.game.${line}`}\n` }
       }
       await new Promise<void>(resolve => (wakeListener = resolve))
     }
@@ -133,6 +144,12 @@ test("with another session's band owning the sound, the pad's moves stay quiet h
   expect(heard).toEqual([])
   await ui.press({ key: 'slide' })
   expect(heard).toEqual(['slide'])
+  // Muted in another session, which posts it: quiet here too, and the band says so.
+  shared.set('sound', false)
+  await pad('com.padcoder.bugdash.sound')
+  await ui.press({ key: 'slide' })
+  expect(heard).toEqual(['slide'])
+  expect(await ui.find({ type: 'Button', key: 'sound' })).toMatchObject({ props: { label: 'Unmute' } })
   await pad('end')
   await ui.unmount()
 })
@@ -468,4 +485,17 @@ test("a run the race turns away says why, not that the race couldn't be reached"
   expect(sentOf({ status: 409, text: JSON.stringify({ error: 'This Bug Dash is out of date: update it to race online.' }) })).toEqual({ refused: 'This Bug Dash is out of date: update it to race online.' })
   expect(sentOf({ status: 503, text: 'busy' })).toBe('failed')
   expect(sentOf(undefined)).toBe('failed')
+})
+
+test('a magnet running out redraws the run, so its icon leaves the HUD', () => {
+  const run = (magnetUntil: number) => {
+    const g = newGame()
+    g.seed = 9
+    act(g, 'jump', 0)
+    g.magnetUntil = magnetUntil
+    advance(g, 200)
+    return advance(g, 300)
+  }
+  expect(run(0)).toBe('none')
+  expect(run(250)).toBe('changed')
 })

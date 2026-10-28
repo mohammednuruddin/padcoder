@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
 import { EARNED_BY, SERVER, asked, boardOf, boardPath, hasSkin, joined, medalsFrom, medalsOf, medalsPath, runBody, sentOf, type Answer, type Medals, type Player } from './race'
-import { SKINS, act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race, type Skin } from './scene'
+import { LATE_MS, SKINS, act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race, type Skin } from './scene'
 
 type Signal = Action | 'on' | 'off' | 'show' | 'hide'
 
@@ -38,7 +38,7 @@ let raceDay = ''
 let raceAt = -Infinity
 let runDay = ''
 const STALE_MS = 10 * 60_000
-// The skin Clawd wears, and the medals that earn them, fetched once a day.
+// The skin Clawd wears, and the medals that earn them, as of the latest final day.
 let skin: Skin = 'clay'
 let medals: Medals | undefined
 let medalsDay = ''
@@ -46,33 +46,61 @@ let medalsDay = ''
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
 // Sound, from sounds/: on unless /bugdash sound or Mute turns it off, in
-// every session, as the shared store keeps it. In pad game mode every open
-// session plays the same run, so one at a time owns the sound: the one last
-// played here, or, from the pad, whichever claims it once the owner has gone
-// quiet.
+// every session. In pad game mode every open session plays the same run, so
+// one at a time owns the sound: the one last played here, or, from the pad,
+// whichever claims it once the owner has gone quiet. The shared store keeps
+// both; each session keeps them in memory too, reading the store only when
+// another posts SOUND or a hold it saw runs out.
 let sound = true
+const SOUND = 'com.padcoder.bugdash.sound'
 const ME = Math.random().toString(36).slice(2)
 const OWNER_MS = 5000
+const RENEW_MS = 1000
 // A pad move reaches every session at once, so with nobody owning the sound
 // each claims it; once all the claims have landed, the last one stands.
 const SETTLE_MS = 40
 type Owner = { readonly id: string; readonly at: number }
 const ownerOf = async ($: EngineInterface) => (await $.store.get('soundOwner')) as Owner | undefined
+// When this session last claimed or renewed the sound; until when another holds it.
+let mineAt: number | undefined
+let otherUntil = 0
 
 async function play($: EngineInterface, clip: string, here = false) {
-  sound = (await $.store.get('sound')) !== false
   if (!sound) return
   const now = await $.clock.now()
-  const owner = await ownerOf($)
-  const owns = owner !== undefined && now - owner.at < OWNER_MS
-  const mine = owns && owner.id === ME
-  if (!here && owns && !mine) return
-  if (!mine || now - (owner?.at ?? 0) > 1000) await $.store.set('soundOwner', { id: ME, at: now })
-  if (!here && !mine) {
-    await new Promise<void>(resolve => $.clock.after(SETTLE_MS, resolve))
-    if ((await ownerOf($))?.id !== ME) return
+  const holding = mineAt !== undefined && now - mineAt < OWNER_MS
+  if (!holding) {
+    if (!here && now < otherUntil) return
+    const owner = await ownerOf($)
+    if (!here && owner !== undefined && owner.id !== ME && now - owner.at < OWNER_MS) {
+      otherUntil = owner.at + OWNER_MS
+      return
+    }
+    await $.store.set('soundOwner', { id: ME, at: now })
+    mineAt = now
+    if (here) post($, SOUND)
+    else {
+      await new Promise<void>(resolve => $.clock.after(SETTLE_MS, resolve))
+      if ((await ownerOf($))?.id !== ME) {
+        mineAt = undefined
+        return
+      }
+    }
+  } else if (now - (mineAt ?? 0) > RENEW_MS) {
+    await $.store.set('soundOwner', { id: ME, at: now })
+    mineAt = now
   }
   await $.audio.play({ asset: `sounds/${clip}.wav` }, { gain: 0.5 }).catch(() => undefined)
+}
+
+// Another session muted, unmuted or took the sound: read where things stand.
+async function syncSound($: EngineInterface) {
+  const was = sound
+  sound = (await $.store.get('sound')) !== false
+  const owner = await ownerOf($)
+  if (owner?.id !== ME) mineAt = undefined
+  otherUntil = owner !== undefined && owner.id !== ME ? owner.at + OWNER_MS : 0
+  if (sound !== was) redraw($)
 }
 // The rules' pops (a token, a smash, a double jump, a level) already heard;
 // each kind has a clip of its name.
@@ -138,12 +166,15 @@ async function refresh($: EngineInterface) {
   // Mid-run on yesterday's course, today's ghosts wait: the next run fetches again.
   if (setGhosts(game, daySeed(day), ghosts)) raceDay = day
   redraw($)
-  if (medalsDay !== day) await fetchMedals($, day)
+  await medalsFor($, now)
 }
 
-// The player's medals, kept for when the race can't be reached.
-async function fetchMedals($: EngineInterface, day: string) {
-  if (player === undefined) return
+// The player's medals, fetched again only once another day is final (a day's
+// late runs are in LATE_MS after it ends), and kept for when the race can't
+// be reached.
+async function medalsFor($: EngineInterface, now: number) {
+  const day = dayOf(now - LATE_MS)
+  if (player === undefined || medalsDay === day) return
   const got = medalsOf(await call($, medalsPath(player.name)))
   if (got === undefined) return
   medals = got
@@ -153,7 +184,7 @@ async function fetchMedals($: EngineInterface, day: string) {
 
 // /bugdash skin lists the skins; /bugdash skin <name> puts one on.
 async function wear($: EngineInterface, name: string) {
-  if (player !== undefined) await fetchMedals($, dayOf(await $.clock.now()))
+  await medalsFor($, await $.clock.now())
   const want = SKINS.find(s => s === name.toLowerCase())
   if (name === '' || want === undefined) {
     const rows = SKINS.map(s => `${s}: ${s === skin ? 'wearing' : hasSkin(s, medals) ? 'earned' : EARNED_BY[s]}`).join('\n')
@@ -233,8 +264,9 @@ async function stop($: EngineInterface, why: PauseReason) {
 }
 
 async function toggleSound($: EngineInterface) {
-  sound = (await $.store.get('sound')) === false
+  sound = !sound
   await $.store.set('sound', sound)
+  post($, SOUND)
   redraw($)
   return sound ? 'Bug Dash has sound again.' : 'Bug Dash is muted. /bugdash sound brings it back.'
 }
@@ -261,13 +293,17 @@ async function topText($: EngineInterface) {
 }
 
 async function listen($: EngineInterface) {
-  const argv = ['/usr/bin/notifyutil', ...Object.keys(SIGNALS).flatMap(name => ['-w', name])]
+  const argv = ['/usr/bin/notifyutil', ...[...Object.keys(SIGNALS), SOUND].flatMap(name => ['-w', name])]
   let pending = ''
   try {
     for await (const piece of $.process.spawn({ argv })) {
       const lines = (pending + piece.text).split('\n')
       pending = lines.pop() ?? ''
       for (const line of lines) {
+        if (line.trim() === SOUND) {
+          void syncSound($)
+          continue
+        }
         const signal = SIGNALS[line.trim()]
         if (signal === undefined) continue
         // A move means the pad plays a shown run, even in a session that
@@ -363,8 +399,6 @@ export const register: Register = on => {
     const { Box, Button, Svg } = elements
 
     const said = await read($, claude)
-    // Another session's Mute shows here too.
-    sound = (await $.store.get('sound')) !== false
     const view = { width: widthFor(e.props.bodyColumns), claude: e.props.isWorking ? 'working' : said === 'working' ? 'idle' : said, race, skin } as const
     const now = await $.clock.now()
     const beneath = await next(e).catch(() => undefined)
