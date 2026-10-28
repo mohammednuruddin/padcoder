@@ -92,20 +92,25 @@ lists them under **✦ Claude**, so you can put them on any button.
 ![Bug Dash](docs/bugdash.png)
 
 An endless runner that lives in Claude Code itself: a mod drawn in the band above the prompt, where
-pets live. Clawd runs through a city of code at dusk, jumping bugs, sliding under failing tests and
-grabbing ✦ tokens.
+pets live. Clawd runs through a city of code at dusk, jumping bugs and CI gates, sliding under failing
+tests and moths, and grabbing ✦ tokens.
 
 - **L1 + Touchpad** shows it and turns the pad into its controller. Press it again to drive Claude.
   `/bugdash` shows or hides it too, and hiding it gives the pad back to Claude.
 - **✕** or the touchpad jumps (press again in the air to double-jump) · **○** slides under a FAIL banner
   (in the air it dives) · **□ / R1 / R2** dash through anything, using one of three charges ·
   **Options** pauses. No pad? Click **Play** on the band, then use w, s, d and p.
-- A token is 25 points, clearing a bug or a banner 10, and smashing a bug mid-dash 15. Your best is kept.
-- Chiptune sounds for each move, tokens, level-ups and getting caught. **Mute** on the band, or
+- A token is 25 points, clearing an obstacle 10, and smashing one mid-dash 15. Your best is kept.
+- Moths flutter at head height: slide under them, or leap clear over. CI gates rise and fall, and come
+  in low: jump one as it does.
+- Two power-ups float along the course. A **shield** (a passing check) takes one hit for Clawd. A
+  **magnet** draws in every token near Clawd for eight seconds, high or low.
+- Chiptune sounds for each move, tokens, power-ups, level-ups and getting caught. **Mute** on the band, or
   `/bugdash sound`, turns them off and on.
 - Every 9 seconds is a new level. The world speeds up and the long gaps close in, and combos come in
-  as you go: a bug then a banner from level 4, a banner then a bug from level 6, three bugs from level 9
-  and two banners from level 12. Points count double from level 5, triple from level 9 and so on. It
+  as you go: a bug then a banner from level 4, a banner then a bug from level 6, moths from level 7,
+  three bugs from level 9, CI gates from level 10, two banners from level 12, and a bug then a moth
+  from level 14. Shields come in from level 3 and magnets from level 5. Points count double from level 5, triple from level 9 and so on. It
   stops getting harder at level 41, six minutes in.
 - When Claude **finishes** or **needs your approval**, the run pauses and says why, and the pad goes
   straight back to Claude. Resuming counts down 3, 2, 1 first. The pad rumbles when Clawd is caught.
@@ -125,6 +130,10 @@ Everyone runs the same course each day (UTC), and you can race it online:
 - Two ghosts run with you: the day's leader and your own best, pale Clawds just behind yours, with
   their names and scores on the ground beneath.
 - `/bugdash top` lists today's top ten. `/bugdash leave` stops sending runs; your name stays taken.
+- Placing earns Clawd a new look: a day ended in the top ten earns **copper**, the top three **silver**,
+  and first place **gold**. `/bugdash skin` lists them, and `/bugdash skin gold` puts one on.
+- An older Bug Dash is turned away with a note to update it, because a run only replays under the rules
+  it was played with.
 - What is sent, to `bug-dash.nurusterling.workers.dev`: your name, and each run's moves and score.
   Nothing about Claude or your work. Until you join, the mod sends nothing, except the request for the
   board when you run `/bugdash top`.
@@ -233,7 +242,7 @@ Actions:
 | `mods/bug-dash/hooks/scene.ts` | Bug Dash's rules and its SVG scene |
 | `mods/bug-dash/hooks/register.tsx` | The mod's hooks: the band, `/bugdash`, the pad's signals, the race's requests |
 | `mods/bug-dash/hooks/race.ts` | What goes to the race server and how its answers are read |
-| `server/src/index.ts` | The race server: joining, the daily board and ghosts, replaying runs |
+| `server/src/index.ts` | The race server: joining, the daily board and ghosts, replaying runs, medals |
 
 ## Troubleshooting
 The log is at `~/Library/Logs/PadCoder.log` (🎮 → Open Log). It records button presses,

@@ -47,6 +47,8 @@ export default {
       if (request.method === 'POST' && url.pathname === '/run') return await run(request, env)
       const day = /^\/day\/([^/]+)$/.exec(url.pathname)?.[1]
       if (request.method === 'GET' && day !== undefined) return json(await board(env, day, url.searchParams.get('name')))
+      const name = /^\/medals\/([^/]+)$/.exec(url.pathname)?.[1]
+      if (request.method === 'GET' && name !== undefined) return json(await medals(env, decodeURIComponent(name)))
       throw new Refusal(404, 'Nothing here.')
     } catch (error) {
       if (error instanceof Refusal) return json({ error: error.message }, error.status)
@@ -94,6 +96,20 @@ async function board(env: Env, day: string, name: string | null) {
     }
   }
   return { day, rules: RULES_VERSION, total: count?.total ?? 0, top, you, ghosts }
+}
+
+// How many finished days (before today, in UTC) `name` won, ended in the top
+// three, and ended in the top ten, on any rules' board: what earns skins.
+async function medals(env: Env, name: string) {
+  if (!NAME.test(name)) throw new Refusal(400, 'A name is 2 to 16 letters, digits, _ or -.')
+  const row = await env.DB.prepare(
+    `SELECT COUNT(CASE WHEN place = 1 THEN 1 END) AS gold, COUNT(CASE WHEN place <= 3 THEN 1 END) AS silver, COUNT(*) AS copper FROM (
+       SELECT key, ROW_NUMBER() OVER (PARTITION BY day, rules ORDER BY score DESC, at ASC) AS place FROM runs WHERE day < ?
+     ) WHERE key = ? AND place <= ?`,
+  )
+    .bind(dayOf(Date.now()), name.toLowerCase(), TOP)
+    .first<{ gold: number; silver: number; copper: number }>()
+  return { name, gold: row?.gold ?? 0, silver: row?.silver ?? 0, copper: row?.copper ?? 0 }
 }
 
 // Plays a run again from today's seed and its moves, and keeps it if it's

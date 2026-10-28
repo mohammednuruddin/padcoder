@@ -2,7 +2,7 @@
 // are read. A name to race under, today's board and ghosts, and each run sent
 // when Clawd is caught, for the server to play again and rank.
 
-import { RULES_VERSION, type GhostRun, type Move, type Race } from './scene'
+import { RULES_VERSION, type GhostRun, type Move, type Race, type Skin } from './scene'
 
 // The race server, server/ in this repository; empty turns the race off.
 export const SERVER = 'https://bug-dash.nurusterling.workers.dev'
@@ -65,3 +65,23 @@ export function sentOf(answer: Answer | undefined): Sent {
   const data = fields(answer)
   return isNumber(data.rank) && isNumber(data.total) && isNumber(data.best) ? { rank: data.rank, total: data.total, best: data.best } : 'failed'
 }
+
+// The finished days a player won, ended in the top three, and in the top ten.
+export type Medals = { readonly gold: number; readonly silver: number; readonly copper: number }
+export const medalsPath = (name: string) => `/medals/${encodeURIComponent(name)}`
+
+// Medals as the server or the store holds them; undefined when they aren't.
+export function medalsFrom(value: unknown): Medals | undefined {
+  const m = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  return isNumber(m.gold) && isNumber(m.silver) && isNumber(m.copper) ? { gold: m.gold, silver: m.silver, copper: m.copper } : undefined
+}
+export const medalsOf = (answer: Answer | undefined) => (answer === undefined || answer.status !== 200 ? undefined : medalsFrom(fields(answer)))
+
+// What earns each skin, and whether `medals` has.
+export const EARNED_BY: Readonly<Record<Skin, string>> = {
+  clay: "Clawd's own",
+  copper: 'end a day in the top ten',
+  silver: 'end a day in the top three',
+  gold: 'win a day',
+}
+export const hasSkin = (skin: Skin, medals: Medals | undefined) => skin === 'clay' || (medals?.[skin] ?? 0) > 0

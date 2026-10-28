@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { ClaudeStatus } from '../types'
-import { SERVER, asked, boardOf, boardPath, joined, runBody, sentOf, type Answer, type Player } from './race'
-import { act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race } from './scene'
+import { EARNED_BY, SERVER, asked, boardOf, boardPath, hasSkin, joined, medalsFrom, medalsOf, medalsPath, runBody, sentOf, type Answer, type Medals, type Player } from './race'
+import { SKINS, act, advance, dayOf, daySeed, drawScene, newGame, nextWake, pause, sceneAlt, setGhosts, widthFor, type Action, type Move, type PauseReason, type Race, type Skin } from './scene'
 
 type Signal = Action | 'on' | 'off' | 'show' | 'hide'
 
@@ -38,6 +38,10 @@ let raceDay = ''
 let raceAt = -Infinity
 let runDay = ''
 const STALE_MS = 10 * 60_000
+// The skin Clawd wears, and the medals that earn them, fetched once a day.
+let skin: Skin = 'clay'
+let medals: Medals | undefined
+let medalsDay = ''
 
 const redraw = ($: EngineInterface) => $.ui.invalidate('ui.render')
 
@@ -123,6 +127,33 @@ async function refresh($: EngineInterface) {
   // Mid-run on yesterday's course, today's ghosts wait: the next run fetches again.
   if (setGhosts(game, daySeed(day), ghosts)) raceDay = day
   redraw($)
+  if (medalsDay !== day) await fetchMedals($, day)
+}
+
+// The player's medals, kept for when the race can't be reached.
+async function fetchMedals($: EngineInterface, day: string) {
+  if (player === undefined) return
+  const got = medalsOf(await call($, medalsPath(player.name)))
+  if (got === undefined) return
+  medals = got
+  medalsDay = day
+  await $.store.set('medals', got)
+}
+
+// /bugdash skin lists the skins; /bugdash skin <name> puts one on.
+async function wear($: EngineInterface, name: string) {
+  if (player !== undefined) await fetchMedals($, dayOf(await $.clock.now()))
+  const want = SKINS.find(s => s === name.toLowerCase())
+  if (name === '' || want === undefined) {
+    const rows = SKINS.map(s => `${s}: ${s === skin ? 'wearing' : hasSkin(s, medals) ? 'earned' : EARNED_BY[s]}`).join('\n')
+    const how = player === undefined ? '\n/bugdash join <name> races online, where the metals are earned.' : ''
+    return `${name === '' ? '' : `No skin called ${name}. `}Skins for Clawd, /bugdash skin <name> to wear one:\n${rows}${how}`
+  }
+  if (!hasSkin(want, medals)) return `${want} is earned in the daily race: ${EARNED_BY[want]}.`
+  skin = want
+  await $.store.set('skin', want)
+  redraw($)
+  return `Clawd wears ${want}.`
 }
 
 async function wake($: EngineInterface) {
@@ -206,7 +237,7 @@ async function joinRace($: EngineInterface, name: string) {
   player = made
   await $.store.set('player', made)
   await refresh($)
-  return `You're in the daily race as ${made.name}. Each run on today's course is sent when Clawd is caught, and the leader's and your best run alongside you as ghosts.`
+  return `You're in the daily race as ${made.name}. Each run on today's course is sent when Clawd is caught, and the leader's best run and yours race alongside you as ghosts.`
 }
 
 async function topText($: EngineInterface) {
@@ -248,6 +279,9 @@ export const register: Register = on => {
     sound = (await $.store.get('sound')) !== false
     const kept = (await $.store.get('player')) as Partial<Player> | undefined
     if (typeof kept?.name === 'string' && typeof kept.token === 'string') player = { name: kept.name, token: kept.token }
+    const worn = await $.store.get('skin')
+    skin = SKINS.find(s => s === worn) ?? 'clay'
+    medals = medalsFrom(await $.store.get('medals'))
     void listen($)
     void refresh($)
     return started
@@ -269,7 +303,8 @@ export const register: Register = on => {
     }
     if (word === 'top') return { text: await topText($) }
     if (word === 'sound') return { text: await toggleSound($) }
-    if (word !== '') return { text: 'Use /bugdash to show or hide it, /bugdash join <name> to race online, /bugdash top for the board, /bugdash leave to stop, /bugdash sound to mute or unmute it.' }
+    if (word === 'skin') return { text: await wear($, name) }
+    if (word !== '') return { text: 'Use /bugdash to show or hide it, /bugdash join <name> to race online, /bugdash top for the board, /bugdash leave to stop, /bugdash sound to mute or unmute it, /bugdash skin to dress Clawd.' }
     const showing = !(await read($, shown))
     await handle($, showing ? 'show' : 'hide')
     return {
@@ -311,7 +346,7 @@ export const register: Register = on => {
     const { Box, Button, Svg } = elements
 
     const said = await read($, claude)
-    const view = { width: widthFor(e.props.bodyColumns), claude: e.props.isWorking ? 'working' : said === 'working' ? 'idle' : said, race } as const
+    const view = { width: widthFor(e.props.bodyColumns), claude: e.props.isWorking ? 'working' : said === 'working' ? 'idle' : said, race, skin } as const
     const now = await $.clock.now()
     const beneath = await next(e).catch(() => undefined)
     const press = (signal: Signal) => () => handle($, signal)

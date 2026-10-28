@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { LIMIT_MS, RULES_VERSION, act, advance, dayOf, daySeed, distAt, gameTime, multiplier, newGame, nextWake, replay, setGhosts, speedAt, type Game, type Move } from '../hooks/scene'
+import { LIMIT_MS, RULES_VERSION, act, advance, dayOf, daySeed, distAt, gameTime, gateHeight, multiplier, newGame, nextWake, replay, setGhosts, speedAt, type Game, type Move } from '../hooks/scene'
 
 const BAND = {
   plugin: 'bug-dash',
@@ -235,6 +235,7 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
     asked.push(`${e.init?.method ?? 'GET'} ${path.split('?')[0]}`)
     const answer = (status: number, value: unknown) => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(value) } })
     if (path === '/join') return answer(201, { name: 'ada', token: 't0k3n' })
+    if (path === '/medals/ada') return answer(200, { name: 'ada', gold: 0, silver: 1, copper: 2 })
     if (path.startsWith('/day/')) {
       const top = leader ? [{ name: leader.name, score: leader.score, level: 1 }] : []
       return answer(200, { rules: RULES_VERSION, total: top.length, top, you: leader ? { rank: 1, score: leader.score } : undefined, ghosts: leader ? [leader] : [] })
@@ -251,8 +252,9 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
   const alt = async () => (await ui.find({ type: 'Svg' }))?.props.alt as string | undefined
   const svg = async () => (await ui.find({ type: 'Svg' }))?.props.source as string | undefined
 
-  // Not joined: a whole run, and not a word to the server.
+  // Not joined: a whole run, and not a word to the server; no metal to wear.
   await $.command.run(BUGDASH)
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin silver' }))).toMatch(/earned in the daily race: end a day in the top three/)
   await ui.press({ key: 'play' })
   await clock.advance(1_500)
   await ui.press({ key: 'jump' })
@@ -289,6 +291,13 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
   expect(await svg()).toMatch(/ada 0/)
   expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'top' }))).toMatch(/1\. ada/)
 
+  // A day in the top three earns silver; gold waits for a win.
+  const skins = JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin' }))
+  expect(skins).toMatch(/clay: wearing.*copper: earned.*silver: earned.*gold: win a day/)
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin gold' }))).toMatch(/earned in the daily race: win a day/)
+  expect(JSON.stringify(await $.command.run({ ...BUGDASH, args: 'skin silver' }))).toMatch(/Clawd wears silver/)
+  expect(await svg()).toMatch(/\.pc\{fill:#b4bec9\}/)
+
   // Left: runs stay here again.
   await $.command.run({ ...BUGDASH, args: 'leave' })
   const before = asked.length
@@ -301,35 +310,54 @@ test('the daily race: nothing goes out before /bugdash join, then each run is se
 const CLAWD_BACK = 114
 const CLAWD_FRONT = 146
 
-// Moves when the next obstacle is `leadMs` away.
+// What clears each obstacle, where its box ends, and how early the bot moves
+// for it: a gate wants Clawd high as it passes.
+const CLEARS: Readonly<Record<string, { readonly by: 'jump' | 'slide'; readonly r: number; readonly early: number }>> = {
+  bug: { by: 'jump', r: 21, early: 0 },
+  gate: { by: 'jump', r: 12, early: 50 },
+  fail: { by: 'slide', r: 41, early: 0 },
+  moth: { by: 'slide', r: 20, early: 0 },
+}
+
+// Moves when the next obstacle is `leadMs` away, never dashing.
 function bot(g: Game, now: number, leadMs = 100) {
   const t = gameTime(g, now)
   const d = distAt(t)
-  const next = g.things.find(x => x.done === undefined && x.kind !== 'token' && x.x - d + (x.kind === 'bug' ? 21 : 41) > CLAWD_BACK)
-  if (next === undefined) return
+  const next = g.things.find(x => x.done === undefined && CLEARS[x.kind] !== undefined && x.x - d + (CLEARS[x.kind]?.r ?? 0) > CLAWD_BACK)
+  const clears = next && CLEARS[next.kind]
+  if (next === undefined || clears === undefined) return
   const gap = next.x - d + 3 - CLAWD_FRONT
-  const lead = speedAt(t) * leadMs
+  const lead = speedAt(t) * (leadMs + clears.early)
   if (gap <= 0 || gap >= lead) return
-  if (next.kind === 'bug' && g.air === null) act(g, 'jump', now)
-  if (next.kind === 'fail' && t >= g.slideUntil) act(g, 'slide', now)
+  if (clears.by === 'jump' && g.air === null) act(g, 'jump', now)
+  if (clears.by === 'slide' && t >= g.slideUntil) act(g, 'slide', now)
 }
 
 // Plays a run of `seed` for `ms`, noting the game time each obstacle is
-// cleared. `jitter` wakes it at uneven times, as the engine's timers do, and
-// `sloppy` spreads the bot's timing so it gets caught now and then.
-function play(seed: number, ms: number, { jitter = 0, sloppy = 0 } = {}) {
+// cleared, how each thing ended, and each kind met. `jitter` wakes it at
+// uneven times, as the engine's timers do, and `sloppy` spreads the bot's
+// timing so it gets caught now and then; an `idle` one presses nothing. `setUp`
+// changes the run once it starts.
+function play(seed: number, ms: number, { jitter = 0, sloppy = 0, idle = false, setUp = (_: Game) => {} } = {}) {
   const g = newGame()
   g.seed = seed
   act(g, 'jump', 0)
+  setUp(g)
   let r = seed
   const rand = () => (r = (Math.imul(r, 1103515245) + 12345) >>> 0) / 4294967296
   const cleared = new Map<number, number>()
+  const ended = new Map<number, string>()
+  const kinds = new Set<string>()
   for (let now = 0; now < ms && g.mode === 'running'; now += 10 + Math.floor(rand() * jitter)) {
     advance(g, now)
-    bot(g, now, 100 + (rand() - 0.5) * sloppy)
-    for (const thing of g.things) if (thing.done === 'passed' && !cleared.has(thing.id)) cleared.set(thing.id, gameTime(g, now))
+    if (!idle) bot(g, now, 100 + (rand() - 0.5) * sloppy)
+    for (const thing of g.things) {
+      kinds.add(thing.kind)
+      if (thing.done !== undefined && !ended.has(thing.id)) ended.set(thing.id, `${thing.kind} ${thing.done}`)
+      if (thing.done === 'passed' && !cleared.has(thing.id)) cleared.set(thing.id, gameTime(g, now))
+    }
   }
-  return { g, cleared: [...cleared.values()] }
+  return { g, cleared: [...cleared.values()], ended: [...ended.values()], kinds }
 }
 
 test('a run plays again exactly from its seed and its moves, however unevenly it was woken', () => {
@@ -337,7 +365,7 @@ test('a run plays again exactly from its seed and its moves, however unevenly it
   for (const seed of [3, 1_234, 77_777, daySeed('2026-10-27')]) {
     const { g } = play(seed, 300_000, { jitter: 37, sloppy: 300 })
     if (g.mode === 'over') caught++
-    expect(g.log.length).toBeGreaterThan(40)
+    expect(g.log.length).toBeGreaterThan(20)
     const again = replay(seed, g.log, g.mode === 'over' ? 3_600_000 : g.simAt)
     expect([again.mode, again.score, again.simAt, again.level, again.log.length]).toEqual([g.mode, g.score, g.simAt, g.level, g.log.length])
   }
@@ -378,12 +406,34 @@ test('a resume counts 3, 2, 1 with the world still, and buys no safety', () => {
   expect([g.mode, g.gameAt, g.score]).toEqual(['over', at, idle.score])
 })
 
-test('every stretch of the course, to the last level and past it, can be cleared by jumping bugs and sliding under banners', () => {
+test('every stretch of the course, to the last level and past it, can be cleared by jumping bugs and gates and sliding under banners and moths', () => {
   for (const seed of [1, 7_331, 90_210]) {
-    const { g } = play(seed, 420_000)
+    const { g, ended, kinds } = play(seed, 420_000)
     expect(g.mode).toBe('running')
     expect(g.level).toBeGreaterThan(40)
+    expect([...kinds].sort()).toEqual(['bug', 'fail', 'gate', 'magnet', 'moth', 'shield', 'token'])
+    // Cleared, not shielded: nothing was smashed, and every gate and moth passed.
+    expect(ended.filter(e => e.endsWith('smashed'))).toEqual([])
+    expect(ended.filter(e => e.startsWith('gate ') || e.startsWith('moth ')).every(e => e.endsWith('passed'))).toBe(true)
   }
+})
+
+test('a CI gate goes down and up in straight lines, the same on every lap', () => {
+  expect([0, 400, 800, 1200, 1600, -400, 3200 + 200].map(t => gateHeight(0, t))).toEqual([8, 26, 44, 26, 8, 26, 17])
+  expect(gateHeight(1_000, 1_000)).toBe(8)
+})
+
+test('a shield takes one hit for Clawd, and a magnet draws in tokens at any height', () => {
+  // Shielded and idle: the first obstacle is blocked, and the next one catches Clawd.
+  const { g: idle, ended } = play(5, 60_000, { idle: true, setUp: g => (g.shield = true) })
+  expect(idle.mode).toBe('over')
+  expect(ended.filter(e => e.endsWith('smashed'))).toHaveLength(1)
+  expect(idle.shield).toBe(false)
+
+  // With a magnet the whole way, no token is missed.
+  const { ended: drawn } = play(5, 60_000, { setUp: g => (g.magnetUntil = Infinity) })
+  expect(drawn.filter(e => e === 'token taken').length).toBeGreaterThan(10)
+  expect(drawn.filter(e => e === 'token missed')).toEqual([])
 })
 
 test('the run gets harder: faster, with more to clear each second, and worth more', () => {

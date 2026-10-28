@@ -78,4 +78,7 @@ wav('level', mix(...[72, 76, 79, 84].map((m, i) => [i * 70, voice({ ms: i === 3 
 wav('caught', mix([0, voice({ ms: 560, f0: 560, f1: 80, duty: 0.5, vol: 0.32, release: 160, vib: 0.03 })], [480, voice({ ms: 160, wave: 'noise', cutoff: 0.05, vol: 0.5, release: 140 })]))
 wav('count', mix(...[0, 400, 800].map(at => [at, voice({ ms: 90, f0: note(81), duty: 0.5, vol: 0.25, release: 40 })]), [1200, voice({ ms: 220, f0: note(93), duty: 0.25, vol: 0.28, release: 160 })]))
 wav('start', mix(...[67, 72, 79].map((m, i) => [i * 60, voice({ ms: i === 2 ? 180 : 70, f0: note(m), duty: 0.25, vol: 0.26, release: i === 2 ? 140 : 20 })])))
+wav('shield', mix(...[76, 83, 88].map((m, i) => [i * 45, voice({ ms: i === 2 ? 220 : 60, f0: note(m), wave: 'tri', vol: 0.4, release: i === 2 ? 180 : 20, vib: i === 2 ? 0.012 : 0 })])))
+wav('magnet', mix([0, voice({ ms: 260, f0: 220, f1: 660, duty: 0.125, vol: 0.22, release: 120, vib: 0.04 })], [0, voice({ ms: 260, f0: 330, f1: 990, wave: 'tri', vol: 0.25, release: 120 })]))
+wav('block', mix([0, voice({ ms: 180, f0: note(88), f1: note(76), wave: 'tri', vol: 0.4, release: 140 })], [0, voice({ ms: 120, wave: 'noise', cutoff: 0.5, vol: 0.3, release: 100 })]))
 console.log('wrote', out)

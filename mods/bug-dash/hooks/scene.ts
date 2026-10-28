@@ -21,6 +21,17 @@ const RUN_R = RX + 42
 const STAND_H = 22
 const SLIDE_H = 13
 const FAIL_LOW = 15 // how far above the ground a FAIL banner hangs
+// A moth flutters at head height: slide under it, or leap clear over.
+const MOTH_LOW = 15
+const MOTH_HIGH = 30
+// A CI gate rises and falls in a straight line, and comes to Clawd low, give
+// or take GATE_SLACK_MS: a jump clears it.
+const GATE_LOW = 8
+const GATE_HIGH = 44
+const GATE_MS = 1600
+const GATE_SLACK_MS = 300
+const MAGNET_MS = 8000
+const MAGNET_REACH = 70 // how far ahead of Clawd a magnet takes tokens, at any height
 
 const GRAVITY = 0.00118 // px/ms²
 const JUMP_V = 0.33 // px/ms: a 46 px hop, 560 ms in the air
@@ -47,7 +58,7 @@ const LAST_SPREAD_MS = 280 // and at the last level
 // The rules run in 4 ms steps on a fixed grid of game time, and course is
 // laid out a fixed way ahead, so a run is a function of its seed and its
 // moves alone: the server plays it again to check a score.
-export const RULES_VERSION = 1
+export const RULES_VERSION = 2
 const STEP_MS = 4
 export const WIDEST = 1400 // the widest band drawn
 export const LIMIT_MS = 20 * 60_000 // the longest run the race ranks
@@ -63,12 +74,15 @@ export type Action = 'jump' | 'slide' | 'dash' | 'pause'
 export type Move = readonly [t: number, action: Exclude<Action, 'pause'>]
 export type Mode = 'ready' | 'running' | 'paused' | 'over'
 export type PauseReason = 'you' | 'pad' | 'finished' | 'needsYou' | 'hidden'
-type Kind = 'bug' | 'fail' | 'token'
+type Kind = 'bug' | 'fail' | 'moth' | 'gate' | 'token' | 'shield' | 'magnet'
+const isPickup = (kind: Kind) => kind === 'token' || kind === 'shield' || kind === 'magnet'
 
-type Thing = { readonly id: number; readonly kind: Kind; readonly x: number; readonly h: number; done?: 'passed' | 'taken' | 'smashed' | 'missed' }
+// `h` is how high a pickup floats; `low`, the game time a gate is lowest.
+type Thing = { readonly id: number; readonly kind: Kind; readonly x: number; readonly h: number; readonly low?: number; done?: 'passed' | 'taken' | 'smashed' | 'missed' }
 type Air = { readonly at: number; readonly h: number; readonly v: number }
-// `value` is the points scored, or the level reached.
-type Pop = { readonly kind: 'token' | 'smash' | 'double' | 'level'; readonly y: number; readonly wall: number; readonly value: number }
+// `value` is the points scored, or the level reached. A block is the shield
+// taking a hit.
+type Pop = { readonly kind: 'token' | 'smash' | 'double' | 'level' | 'shield' | 'magnet' | 'block'; readonly y: number; readonly wall: number; readonly value: number }
 
 export type Game = {
   mode: Mode
@@ -87,6 +101,8 @@ export type Game = {
   dashUntil: number
   energy: number
   energyAt: number
+  shield: boolean
+  magnetUntil: number
   things: Thing[]
   log: Move[]
   nextId: number
@@ -114,13 +130,17 @@ export type Race = {
   readonly sent?: 'sending' | 'failed' | { readonly rank: number; readonly total: number; readonly best: number }
 }
 
-export type View = { readonly width: number; readonly claude: ClaudeStatus; readonly race?: Race }
+// What Clawd wears: clay to start, and metals placing in the daily race earns.
+export const SKINS = ['clay', 'copper', 'silver', 'gold'] as const
+export type Skin = (typeof SKINS)[number]
+
+export type View = { readonly width: number; readonly claude: ClaudeStatus; readonly race?: Race; readonly skin?: Skin }
 
 export const widthFor = (columns: number) => Math.min(WIDEST, Math.max(360, Math.round(columns * 8)))
 
 export const newGame = (): Game => ({
   mode: 'ready', why: 'you', seed: 1, rng: 1, gameAt: 0, clockAt: 0, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
-  slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, things: [], log: [], nextId: 1, aheadTo: 0,
+  slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, shield: false, magnetUntil: 0, things: [], log: [], nextId: 1, aheadTo: 0,
   level: 0, charges: 1, score: 0, best: 0, isNewBest: false, pops: [], crash: null, ghosts: [],
 })
 
@@ -183,17 +203,47 @@ const energyAt = (g: Game, t: number) => Math.min(CHARGES, g.energy + (t - g.ene
 const BOX: Readonly<Record<Kind, { readonly l: number; readonly r: number; readonly w: number }>> = {
   bug: { l: 3, r: 21, w: 24 },
   fail: { l: 3, r: 41, w: 44 },
+  moth: { l: 2, r: 20, w: 22 },
+  gate: { l: 2, r: 12, w: 14 },
   token: { l: 1, r: 13, w: 14 },
+  shield: { l: 1, r: 13, w: 14 },
+  magnet: { l: 1, r: 13, w: 14 },
 }
-const reach = (thing: Thing): readonly [number, number] =>
-  thing.kind === 'bug' ? [0, 10] : thing.kind === 'fail' ? [FAIL_LOW, 999] : [thing.h, thing.h + 12]
+
+// How tall a gate lowest at game time `low` stands at `t`: down and up in
+// straight lines, which every engine works out alike.
+export function gateHeight(low: number, t: number) {
+  const u = (((t - low) % GATE_MS) + GATE_MS) % GATE_MS
+  return GATE_HIGH - ((GATE_HIGH - GATE_LOW) * Math.abs(u - GATE_MS / 2)) / (GATE_MS / 2)
+}
+
+function reach(thing: Thing, t: number): readonly [number, number] {
+  switch (thing.kind) {
+    case 'bug':
+      return [0, 10]
+    case 'fail':
+      return [FAIL_LOW, 999]
+    case 'moth':
+      return [MOTH_LOW, MOTH_HIGH]
+    case 'gate':
+      return [0, gateHeight(thing.low ?? 0, t)]
+    default:
+      return [thing.h, thing.h + 12]
+  }
+}
+
+// How far ahead of Clawd things can be touched at `t`: further for tokens
+// while a magnet draws them in.
+const reachAhead = (g: Game, t: number) => (t < g.magnetUntil ? MAGNET_REACH : 0)
 
 function touches(g: Game, thing: Thing, t: number): boolean {
   const x = thing.x - distAt(t)
   const box = BOX[thing.kind]
-  if (x + box.l >= RUN_R || x + box.r <= RUN_L) return false
+  if (x + box.r <= RUN_L) return false
+  if (thing.kind === 'token' && t < g.magnetUntil) return x + box.l < RUN_R + MAGNET_REACH
+  if (x + box.l >= RUN_R) return false
   const h = heightAt(g.air, t)
-  const [low, high] = reach(thing)
+  const [low, high] = reach(thing, t)
   return h + (isSliding(g, t) ? SLIDE_H : STAND_H) > low && h < high
 }
 
@@ -216,6 +266,15 @@ function place(g: Game, kind: Kind, x: number, h = 0) {
 type Lay = (g: Game, x: number, speed: number) => number
 
 const layBug: Lay = (g, x) => place(g, 'bug', x)
+
+// A gate is lowest about when it passes Clawd, wherever it is on the course.
+const layGate: Lay = (g, x) => {
+  const box = BOX.gate
+  const passes = timeAtDist(x + (box.l + box.r) / 2 - (RUN_L + RUN_R) / 2)
+  const low = Math.round(passes + (random(g) * 2 - 1) * GATE_SLACK_MS)
+  g.things.push({ id: g.nextId++, kind: 'gate', x, h: 0, low })
+  return x + box.w
+}
 
 // Each pattern: the level it first comes up at, and how often it comes up
 // at the first level and at the last. The parts of a combo are spaced in
@@ -282,6 +341,24 @@ const PATTERNS: readonly { readonly from: number; readonly first: number; readon
       return place(g, 'fail', x + 56)
     },
   },
+  // A moth at head height: slide under it, or leap clear over.
+  { from: 6, first: 9, last: 12, lay: (g, x) => place(g, 'moth', x) },
+  // A CI gate going up and down, low as it comes: jump it.
+  { from: 9, first: 9, last: 12, lay: layGate },
+  // A bug, then a moth: jump, land, and slide.
+  { from: 13, first: 8, last: 12, lay: (g, x, speed) => place(g, 'moth', place(g, 'bug', x) + speed * 640) },
+  // A shield, up where a jump takes it: it takes one hit for Clawd.
+  { from: 2, first: 3, last: 3, lay: (g, x) => place(g, 'shield', x, 24) },
+  // A magnet, then tokens high and low for it to draw in.
+  {
+    from: 4, first: 3, last: 3,
+    lay: (g, x) => {
+      place(g, 'magnet', x, 2)
+      let end = x
+      for (const [i, h] of [2, 40, 24, 40, 2].entries()) end = place(g, 'token', x + 60 + i * 24, h)
+      return end
+    },
+  },
 ]
 
 function pick(g: Game, level: number): Lay {
@@ -310,7 +387,7 @@ function generate(g: Game, upTo: number) {
 function start(g: Game, now: number) {
   Object.assign(g, {
     mode: 'running', why: 'you', rng: g.seed, gameAt: 0, clockAt: now, countdownUntil: 0, simAt: 0, air: null, jumps: 0,
-    slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, things: [], log: [], aheadTo: RX + 300,
+    slideUntil: 0, dashUntil: 0, energy: 1, energyAt: 0, shield: false, magnetUntil: 0, things: [], log: [], aheadTo: RX + 300,
     level: 0, charges: 1, score: 0, isNewBest: false, pops: [], crash: null,
   } satisfies Partial<Game>)
   generate(g, AHEAD + WIDEST)
@@ -365,8 +442,9 @@ function crash(g: Game, kind: Kind, t: number, wall: number) {
 const lifetime = (pop: Pop) => (pop.kind === 'level' ? LEVEL_POP_MS : POP_MS)
 
 // Runs the world on to game time `end`, a grid step at a time, laying course
-// as it goes: tokens taken, bugs smashed or passed, or Clawd caught. However
-// often it is called, the same moves meet the course the same way.
+// as it goes: tokens and power-ups taken, obstacles smashed, blocked or
+// passed, or Clawd caught. However often it is called, the same moves meet
+// the course the same way.
 function runTo(g: Game, end: number, now: number): 'none' | 'changed' | 'over' {
   if (g.mode !== 'running') return 'none'
   let changed = false
@@ -382,28 +460,40 @@ function runTo(g: Game, end: number, now: number): 'none' | 'changed' | 'over' {
       g.air = null
       g.jumps = 0
     }
+    const ahead = reachAhead(g, t)
     for (const thing of g.things) {
       // Things lie in order along the course: the rest have yet to reach Clawd.
-      if (thing.x - d >= RUN_R) break
+      if (thing.x - d >= RUN_R + ahead) break
       if (thing.done !== undefined) continue
       if (thing.x - d + BOX[thing.kind].r <= RUN_L) {
-        thing.done = thing.kind === 'token' ? 'missed' : 'passed'
-        if (thing.kind !== 'token') g.score += POINTS.pass * times
-        changed ||= thing.kind !== 'token'
+        const pickup = isPickup(thing.kind)
+        thing.done = pickup ? 'missed' : 'passed'
+        if (!pickup) g.score += POINTS.pass * times
+        changed ||= !pickup
         continue
       }
       if (!touches(g, thing, t)) continue
       const wall = now - (end - t)
+      const y = heightAt(g.air, t)
+      changed = true
       if (thing.kind === 'token') {
         thing.done = 'taken'
         g.score += POINTS.token * times
-        g.pops.push({ kind: 'token', y: heightAt(g.air, t), wall, value: POINTS.token * times })
-        changed = true
+        g.pops.push({ kind: 'token', y, wall, value: POINTS.token * times })
+      } else if (thing.kind === 'shield' || thing.kind === 'magnet') {
+        thing.done = 'taken'
+        if (thing.kind === 'shield') g.shield = true
+        else g.magnetUntil = t + MAGNET_MS
+        g.pops.push({ kind: thing.kind, y, wall, value: 0 })
       } else if (t < g.dashUntil) {
         thing.done = 'smashed'
         g.score += POINTS.smash * times
         g.pops.push({ kind: 'smash', y: 0, wall, value: POINTS.smash * times })
-        changed = true
+      } else if (g.shield) {
+        thing.done = 'smashed'
+        g.shield = false
+        g.score += POINTS.smash * times
+        g.pops.push({ kind: 'block', y, wall, value: POINTS.smash * times })
       } else {
         crash(g, thing.kind, t, wall)
         return 'over'
@@ -434,8 +524,9 @@ export function advance(g: Game, now: number): 'none' | 'changed' | 'over' {
 }
 
 // When the run can next change, in wall milliseconds from `now`: the
-// countdown ending, a thing reaching Clawd, Clawd touching one as things
-// stand, the next level, a dash charge filling, the course needing more laid out.
+// countdown ending, a thing reaching Clawd (or a magnet's reach), Clawd
+// touching one as things stand, the next level, a dash charge filling, a
+// magnet running out, the course needing more laid out.
 export function nextWake(g: Game, now: number): number | undefined {
   if (g.mode !== 'running') return undefined
   if (now < g.countdownUntil) return Math.ceil(g.countdownUntil - now) + 1
@@ -444,7 +535,7 @@ export function nextWake(g: Game, now: number): number | undefined {
   for (const thing of g.things) {
     if (thing.done !== undefined) continue
     const box = BOX[thing.kind]
-    const enter = timeAtDist(thing.x + box.l - RUN_R)
+    const enter = timeAtDist(thing.x + box.l - RUN_R - (thing.kind === 'token' ? reachAhead(g, t) : 0))
     const exit = timeAtDist(thing.x + box.r - RUN_L)
     if (enter > t) {
       next = Math.min(next, enter)
@@ -464,6 +555,7 @@ export function nextWake(g: Game, now: number): number | undefined {
     next = Math.min(next, ghost.moves[ghost.next]?.[0] ?? Infinity, ghost.endsAt)
   }
   next = Math.min(next, (levelAt(t) + 1) * LEVEL_MS)
+  if (t < g.magnetUntil) next = Math.min(next, g.magnetUntil)
   const e = energyAt(g, t)
   if (e < CHARGES) next = Math.min(next, t + (Math.floor(e) + 1 - e) / REGEN)
   next = Math.min(next, timeAtDist(g.aheadTo - AHEAD))
@@ -594,18 +686,23 @@ function sentText(race: Race | undefined) {
   return `#${sent.rank} of ${sent.total} today · best ${sent.best}`
 }
 
+// What caught Clawd.
+const caughtBy = (kind: Kind | undefined) =>
+  kind === 'fail' ? 'tests failed' : kind === 'moth' ? 'caught by a moth' : kind === 'gate' ? 'blocked by CI' : 'squashed by a bug'
+
 export function sceneAlt(g: Game, view: View): string {
   const status = STATUS_TEXT[view.claude]
   const race = view.race
+  const powers = `${g.shield ? ', shielded' : ''}${g.simAt < g.magnetUntil ? ', magnet on' : ''}`
   switch (g.mode) {
     case 'ready':
       return `Bug Dash, ready: ✕ or Play to run. Best ${g.best}.${race ? ` ${standing(race)}.` : ''}`
     case 'running':
-      return `Bug Dash, running: ${g.score} points, level ${g.level + 1}, best ${g.best}.${status ? ` ${status}.` : ''}`
+      return `Bug Dash, running: ${g.score} points, level ${g.level + 1}, best ${g.best}${powers}.${status ? ` ${status}.` : ''}`
     case 'paused':
-      return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, level ${g.level + 1}, best ${g.best}.`
+      return `Bug Dash, paused: ${PAUSE_TEXT[g.why]}. ${g.score} points, level ${g.level + 1}, best ${g.best}${powers}.`
     case 'over':
-      return `Bug Dash, over: ${g.crash?.kind === 'fail' ? 'tests failed' : 'squashed by a bug'} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.${sentText(race) ? ` ${sentText(race)}.` : ''}`
+      return `Bug Dash, over: ${caughtBy(g.crash?.kind)} at ${g.score} points on level ${g.level + 1}${g.isNewBest ? ', a new best' : `, best ${g.best}`}.${sentText(race) ? ` ${sentText(race)}.` : ''}`
   }
 }
 
@@ -626,8 +723,15 @@ function seeded(seed: number) {
 }
 
 // Pixel art, one path per colour: `.` is empty; `l` light, `#` clay, `d`
-// shade, `e` an eye.
+// shade, `e` an eye. Each colour but the eyes' has a class a skin repaints.
 const PIXEL_FILL: Readonly<Record<string, string>> = { l: '#EE9B7C', '#': CLAY, d: '#B5593C', e: '#1E1412' }
+const PIXEL_CLASS: Readonly<Record<string, string>> = { l: 'pl', '#': 'pc', d: 'pd', e: 'eye' }
+const SKIN_CSS: Readonly<Record<Skin, string>> = {
+  clay: '',
+  copper: '.pl{fill:#f3b088}.pc{fill:#b9652f}.pd{fill:#7c3b17}',
+  silver: '.pl{fill:#f4f7fa}.pc{fill:#b4bec9}.pd{fill:#78838f}',
+  gold: '.pl{fill:#ffe9a8}.pc{fill:#e2ae35}.pd{fill:#a06f12}',
+}
 function pixels(rows: readonly string[], fill?: string): string {
   const paths = new Map<string, string>()
   rows.forEach((row, y) => {
@@ -644,7 +748,7 @@ function pixels(rows: readonly string[], fill?: string): string {
       x = end
     }
   })
-  return [...paths].map(([c, d]) => `<path${c === 'e' ? ' class="eye"' : ''} fill="${fill ?? PIXEL_FILL[c] ?? CLAY}" d="${d}"/>`).join('')
+  return [...paths].map(([c, d]) => `<path class="${PIXEL_CLASS[c] ?? 'pc'}" fill="${fill ?? PIXEL_FILL[c] ?? CLAY}" d="${d}"/>`).join('')
 }
 
 // Clawd, Claude Code's own: ▐▛███▜▌ over ▝▜█████▛▘ over ▘▘ ▝▝, a quadrant a pixel.
@@ -675,6 +779,31 @@ const FAIL = `<g id="fail">
 <rect x=".5" y="${BANNER_TOP + 0.5}" width="43" height="17" rx="2.5" fill="none" stroke="#ff9a9a" stroke-opacity=".55"/>
 <text x="22" y="${BANNER_TOP + 12.4}" text-anchor="middle" font-size="9.5" font-weight="800" letter-spacing="1" fill="#fff" ${FONT}>✗ FAIL</text>
 </g>`
+
+// The first computer bug was a moth.
+const MOTH = `<g id="moth">
+<g class="flap" stroke="#8a735f" stroke-width=".5">
+<path d="M11 7L1.5 1.5Q-.5 6.5 3.5 9.5Z" fill="url(#mothWing)"/><path d="M11 7L20.5 1.5Q22.5 6.5 18.5 9.5Z" fill="url(#mothWing)"/>
+<path d="M11 8.5L4.5 12.5Q6.5 15 10 11Z" fill="url(#mothWing)" opacity=".85"/><path d="M11 8.5L17.5 12.5Q15.5 15 12 11Z" fill="url(#mothWing)" opacity=".85"/>
+<circle cx="5.5" cy="5" r="1.2" fill="#6b4f3e" opacity=".55" stroke="none"/><circle cx="16.5" cy="5" r="1.2" fill="#6b4f3e" opacity=".55" stroke="none"/>
+</g>
+<ellipse cx="11" cy="8.5" rx="2" ry="4.8" fill="#4a3a31"/>
+<circle cx="11" cy="3.6" r="1.9" fill="#4a3a31"/>
+<circle cx="10.2" cy="3.2" r=".55" fill="#ffd27a"/><circle cx="11.8" cy="3.2" r=".55" fill="#ffd27a"/>
+<path d="M10.3 2Q8.6-.6 6.8-.4M11.7 2Q13.4-.6 15.2-.4" fill="none" stroke="#4a3a31" stroke-width=".7" stroke-linecap="round"/>
+</g>`
+
+// A CI gate's bar, standing at its full height; it is drawn sunk into its slot.
+const GATE_STRIPES = Array.from({ length: 6 }, (_, i) => `M2 ${GROUND - GATE_HIGH + 9 + i * 6.5}l10-4v2.6l-10 4z`).join('')
+const GATE = `<g id="gateBar">
+<rect x="2" y="${GROUND - GATE_HIGH}" width="10" height="${GATE_HIGH}" rx="2" fill="url(#gateFill)"/>
+<path d="${GATE_STRIPES}" fill="#2a1d14" opacity=".45"/>
+<rect x="2.5" y="${GROUND - GATE_HIGH + 0.5}" width="9" height="${GATE_HIGH - 1}" rx="1.6" fill="none" stroke="#ffe0a8" stroke-opacity=".4"/>
+</g>`
+
+// A shield (a passing check), and a magnet.
+const SHIELD = `<g id="shieldIcon"><path d="M0-6.5L5.5-4V1Q5.5 5.2 0 7.2Q-5.5 5.2-5.5 1V-4Z" fill="url(#shieldFill)" stroke="#e3f4ff" stroke-width=".8"/><path d="M-2.4.3l1.7 1.8 3.2-3.6" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></g>`
+const MAGNET = `<g id="magnetIcon"><path d="M-4.5-5V.5a4.5 4.5 0 0 0 9 0V-5" fill="none" stroke="url(#magnetFill)" stroke-width="3.4"/><rect x="-6.2" y="-7" width="3.4" height="2.8" rx=".5" fill="#e8edf2"/><rect x="2.8" y="-7" width="3.4" height="2.8" rx=".5" fill="#e8edf2"/></g>`
 
 const SPARK_POINTS = Array.from({ length: 16 }, (_, i) => {
   const a = (i * Math.PI) / 8 - Math.PI / 2
@@ -745,7 +874,15 @@ const DEFS = `
 <radialGradient id="tokGlow"><stop offset="0" stop-color="${CLAY}" stop-opacity=".5"/><stop offset="1" stop-color="${CLAY}" stop-opacity="0"/></radialGradient>
 <radialGradient id="dashGlow"><stop offset="0" stop-color="#ffb08a" stop-opacity=".55"/><stop offset="1" stop-color="${CLAY}" stop-opacity="0"/></radialGradient>
 <linearGradient id="title" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f8c2a3"/><stop offset="1" stop-color="${CLAY}"/></linearGradient>
-${skyline('farB', 3, 560, 18, 40)}${skyline('farA', 9, 520, 10, 28)}${CODE}${TILES}${BUG}${FAIL}${SPARK}
+<linearGradient id="mothWing" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#efe3d2"/><stop offset="1" stop-color="#b9a38d"/></linearGradient>
+<linearGradient id="gateFill" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#f7bd5a"/><stop offset="1" stop-color="#c97a22"/></linearGradient>
+<linearGradient id="shieldFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a6e0ff"/><stop offset="1" stop-color="#3b8ad4"/></linearGradient>
+<linearGradient id="magnetFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff8585"/><stop offset="1" stop-color="#c22d3a"/></linearGradient>
+<radialGradient id="shieldGlow"><stop offset="0" stop-color="#6fc3ff" stop-opacity=".5"/><stop offset="1" stop-color="#6fc3ff" stop-opacity="0"/></radialGradient>
+<radialGradient id="magnetGlow"><stop offset="0" stop-color="#ff6b6b" stop-opacity=".45"/><stop offset="1" stop-color="#ff6b6b" stop-opacity="0"/></radialGradient>
+<radialGradient id="bubbleFill"><stop offset=".6" stop-color="#8fd0ff" stop-opacity="0"/><stop offset="1" stop-color="#8fd0ff" stop-opacity=".35"/></radialGradient>
+<clipPath id="slot"><rect x="-10" y="-20" width="40" height="${GROUND + 20}"/></clipPath>
+${skyline('farB', 3, 560, 18, 40)}${skyline('farA', 9, 520, 10, 28)}${CODE}${TILES}${BUG}${FAIL}${SPARK}${MOTH}${GATE}${SHIELD}${MAGNET}
 <g id="cRunA">${pixels(RUN_A)}</g><g id="cRunB">${pixels(RUN_B)}</g><g id="cAir">${pixels(AIR)}</g>
 <g id="cSlide">${pixels(SLIDE)}</g><g id="cGhost">${pixels(RUN_A, CLAY)}</g>
 <g id="cDead">${pixels(DEAD)}<path d="M15 15.5l3 4M18 15.5l-3 4M36 15.5l3 4M39 15.5l-3 4" stroke="#1E1412" stroke-width="1.2"/></g>`
@@ -756,13 +893,22 @@ const CSS = `
 .txt{fill:#f3ede7}.dim{fill:#a39a93}.chip{fill:#000;fill-opacity:.3}.card{fill:#17141a;fill-opacity:.9;stroke:#40363a}
 .veil{fill:#0c0a0e;opacity:.42}.frame{fill:none;stroke:#fff;stroke-opacity:.08}.pip{fill:${CLAY}}.pip0{fill:none;stroke:${CLAY};stroke-opacity:.6}
 .lv{fill:${CLAY}}.mul{fill:#f2bd63}.ghost{opacity:.4;filter:grayscale(1) brightness(1.8)}.up{fill:#ffe2b6;stroke:#140f14;stroke-opacity:.55}
+.pt{fill:#ffd2b8}.ph{fill:#ff8a8a}.pb{fill:#9ad4ff}.bubble{stroke:#9ad4ff}
 @media (prefers-color-scheme: light){
+.pt{fill:#c2653f}.ph{fill:#cf3c43}.pb{fill:#2f7fc4}.bubble{stroke:#3f8fd6}
 .sky{fill:url(#skyL)}.gnd{fill:url(#gndL)}.farB{fill:#eadfd2}.farA{fill:#e0d0c0}.lit{fill:#c58f6c;opacity:.35}
 .code{opacity:.32}.tile{fill:#d3bfab}.star{display:none}.shade{opacity:.13}.rope{stroke:#a8968a}
 .txt{fill:#2b2420}.dim{fill:#7d736b}.chip{fill:#fff;fill-opacity:.6}.card{fill:#fffaf4;fill-opacity:.95;stroke:#e3d5c6}
 .veil{fill:#fffaf4;opacity:.45}.frame{stroke:#000;stroke-opacity:.08}.mul{fill:#a8701c}.ghost{opacity:.3;filter:grayscale(1) brightness(.55)}.up{fill:#b5593c;stroke:#fffaf4;stroke-opacity:.85}}
 .lb{opacity:0}.spin{transform-box:fill-box;transform-origin:center}.swing{transform-box:fill-box;transform-origin:50% 0}
-.ring{transform-box:fill-box;transform-origin:center}
+.ring{transform-box:fill-box;transform-origin:center}.flap{transform-box:fill-box;transform-origin:center}
+.slot{fill:#2a2226}.drain{transform-box:fill-box;transform-origin:left}
+@keyframes flap{from{transform:scaleY(1)}to{transform:scaleY(.35)}}
+@keyframes gate{0%,100%{transform:translateY(${GATE_HIGH - GATE_LOW}px)}50%{transform:translateY(0)}}
+@keyframes lamp{0%,24.9%,75.1%,100%{fill:#5fb878}25%,75%{fill:#F0565B}}
+@keyframes shimmer{from{opacity:.6}to{opacity:1}}
+@keyframes field{from{transform:translateX(5px);opacity:.9}to{transform:translateX(-3px);opacity:0}}
+@keyframes drain{to{transform:scaleX(0)}}
 @keyframes on{to{opacity:1}}@keyframes off{to{opacity:0}}
 @keyframes legA{0%,49.9%{opacity:1}50%,100%{opacity:0}}@keyframes legB{0%,49.9%{opacity:0}50%,100%{opacity:1}}
 @keyframes blink{0%,95%,100%{fill:#1E1412}96.5%{fill:${CLAY}}}
@@ -788,7 +934,8 @@ const LIVE_CSS = `
 .la{animation:legA .2s infinite}.lb{animation:legB .2s infinite}.eye{animation:blink 3.8s infinite}
 .spin{animation:spin 3s linear infinite}.bob{animation:bob .9s ease-in-out infinite alternate}
 .swing{animation:swing 1.4s ease-in-out infinite alternate}.tw{animation:tw 2.2s ease-in-out infinite alternate}
-.pulse{animation:pulse 1.2s ease-in-out infinite}`
+.pulse{animation:pulse 1.2s ease-in-out infinite}.flap{animation:flap .11s ease-in-out infinite alternate}
+.shimmer{animation:shimmer .8s ease-in-out infinite alternate}`
 
 // A layer repeating every `tile`, scrolled at `factor` of the world's speed.
 function layer(id: string, tile: number, factor: number, width: number, d: number, speed: number, live: boolean, css: string[]) {
@@ -826,19 +973,46 @@ function backdrop(width: number, d: number, speed: number, live: boolean, css: s
   )
 }
 
-function world(g: Game, width: number, d: number, speed: number, live: boolean, css: string[]) {
+// A gate at game time `t`: in motion, its bar and lamp run the cycle on from
+// where it is; standing still, they show it.
+function gate(thing: Thing, t: number, live: boolean) {
+  const low = thing.low ?? 0
+  const h = gateHeight(low, t)
+  const lamp = `cx="7" cy="${GROUND - GATE_HIGH - 2.6}" r="2.4" fill="${h < (GATE_LOW + GATE_HIGH) / 2 ? '#5fb878' : '#F0565B'}"`
+  let bar: string
+  if (live) {
+    const into = `-${n((((t - low) % GATE_MS) + GATE_MS) % GATE_MS)}ms`
+    bar = `<g style="animation:gate ${GATE_MS}ms linear ${into} infinite"><use href="#gateBar"/><circle ${lamp} style="animation:lamp ${GATE_MS}ms linear ${into} infinite"/></g>`
+  } else {
+    bar = `<g transform="translate(0 ${n(GATE_HIGH - h)})"><use href="#gateBar"/><circle ${lamp}/></g>`
+  }
+  return `<g clip-path="url(#slot)">${bar}</g><rect class="slot" x="0" y="${GROUND - 2.5}" width="14" height="3.5" rx="1.2"/>`
+}
+
+function world(g: Game, t: number, width: number, d: number, speed: number, live: boolean, css: string[]) {
   const drawn = g.things
     .filter(thing => thing.done !== 'taken' && thing.done !== 'smashed' && thing.x - d > -60)
     .map(thing => {
       const x = n(thing.x - d)
       const lag = `animation-delay:-${n((thing.id % 7) * 0.13)}s`
-      if (thing.kind === 'bug') {
-        return `<g transform="translate(${x} ${GROUND - 15})"><use href="#bug"/><use class="la" href="#legsA" style="${lag}"/><use class="lb" href="#legsB" style="${lag}"/></g>`
+      switch (thing.kind) {
+        case 'bug':
+          return `<g transform="translate(${x} ${GROUND - 15})"><use href="#bug"/><use class="la" href="#legsA" style="${lag}"/><use class="lb" href="#legsB" style="${lag}"/></g>`
+        case 'fail':
+          return `<g transform="translate(${x} 0)"><rect x="2" y="${GROUND}" width="40" height="1.5" fill="#F0565B" opacity=".55"/><g class="swing" style="${lag}"><use href="#fail"/></g></g>`
+        case 'moth':
+          return (
+            `<g transform="translate(${x} 0)"><ellipse cx="11" cy="${GROUND + 1}" rx="6" ry="1.2" class="shade"/>` +
+            `<g transform="translate(0 ${GROUND - MOTH_HIGH - 1})"><g class="bob" style="${lag}"><use href="#moth"/></g></g></g>`
+          )
+        case 'gate':
+          return `<g transform="translate(${x} 0)">${gate(thing, t, live)}</g>`
+        default: {
+          const icon = thing.kind === 'token' ? '<g class="spin"><use href="#spark"/></g>' : `<use href="#${thing.kind}Icon"/>`
+          const glow = thing.kind === 'token' ? 'tokGlow' : `${thing.kind}Glow`
+          return `<g transform="translate(${n(thing.x - d + 7)} ${GROUND - thing.h - 6})"><g class="bob" style="${lag}"><circle r="9" fill="url(#${glow})"/>${icon}</g></g>`
+        }
       }
-      if (thing.kind === 'fail') {
-        return `<g transform="translate(${x} 0)"><rect x="2" y="${GROUND}" width="40" height="1.5" fill="#F0565B" opacity=".55"/><g class="swing" style="${lag}"><use href="#fail"/></g></g>`
-      }
-      return `<g transform="translate(${n(thing.x - d + 7)} ${GROUND - thing.h - 6})"><g class="bob" style="${lag}"><circle r="9" fill="url(#tokGlow)"/><g class="spin"><use href="#spark"/></g></g></g>`
     })
     .join('') + fallenGhosts(g, d)
   if (!live) return `<g>${drawn}</g>`
@@ -911,7 +1085,19 @@ function runner(g: Game, t: number, now: number, live: boolean, css: string[]) {
       `</g>`
   }
 
-  return `${shadow}${lines}<g transform="translate(${RX} ${top})" shape-rendering="crispEdges"><g${hop}>${dash}${poses.join('')}</g></g>`
+  // A shield is a bubble around Clawd; a magnet's field reaches out ahead.
+  const bubble = g.shield
+    ? `<ellipse class="bubble shimmer" cx="27" cy="11" rx="28" ry="17" fill="url(#bubbleFill)" stroke-opacity=".75" shape-rendering="auto"/>`
+    : ''
+  let field = ''
+  if (t < g.magnetUntil) {
+    const arcs = [0, 1, 2]
+      .map(i => `<path d="M${50 + i * 6} ${3 - i * 3}q${7 + i * 3} ${10 + i * 3} 0 ${20 + i * 6}" fill="none" stroke="#ff8f8f" stroke-width="1.2" stroke-linecap="round"${live ? ` style="animation:field 600ms linear -${i * 200}ms infinite"` : ` opacity="${n(0.7 - i * 0.2)}"`}/>`)
+      .join('')
+    field = live ? `<g ${during(0, g.magnetUntil - t)} shape-rendering="auto">${arcs}</g>` : `<g shape-rendering="auto">${arcs}</g>`
+  }
+
+  return `${shadow}${lines}<g transform="translate(${RX} ${top})" shape-rendering="crispEdges"><g${hop}>${dash}${poses.join('')}${field}${bubble}</g></g>`
 }
 
 const esc = (text: string) => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`)
@@ -985,12 +1171,12 @@ function pops(g: Game, now: number, width: number) {
       if (pop.kind === 'double') {
         return `<g transform="translate(${x} ${n(GROUND - pop.y + 1)})"><ellipse class="ring" rx="12" ry="3" fill="none" stroke="#ffd2b8" stroke-width="1.5" style="animation:ring 380ms ease-out ${age} both"/></g>`
       }
-      const color = pop.kind === 'token' ? '#ffd2b8' : '#ff8a8a'
-      const label = `+${pop.value}`
+      const color = pop.kind === 'token' ? 'pt' : pop.kind === 'smash' || pop.kind === 'magnet' ? 'ph' : 'pb'
+      const label = pop.kind === 'shield' ? 'SHIELD' : pop.kind === 'magnet' ? 'MAGNET' : `+${pop.value}`
       return (
-        `<g transform="translate(${x + (pop.kind === 'smash' ? 14 : 0)} ${n(y)})">` +
-        Array.from({ length: 6 }, (_, i) => `<circle r="1.4" fill="${color}" style="animation:b${i} 460ms ease-out ${age} both"/>`).join('') +
-        `<text y="-8" text-anchor="middle" font-size="9" font-weight="700" fill="${color}" ${FONT} style="animation:rise ${POP_MS}ms ease-out ${age} both">${label}</text></g>`
+        `<g class="${color}" transform="translate(${x + (pop.kind === 'smash' || pop.kind === 'block' ? 14 : 0)} ${n(y)})">` +
+        Array.from({ length: 6 }, (_, i) => `<circle r="1.4" style="animation:b${i} 460ms ease-out ${age} both"/>`).join('') +
+        `<text y="-8" text-anchor="middle" font-size="9" font-weight="700" ${FONT} style="animation:rise ${POP_MS}ms ease-out ${age} both">${label}</text></g>`
       )
     })
     .join('')
@@ -1007,6 +1193,16 @@ function hud(g: Game, view: View, width: number, t: number, now: number, live: b
   const level =
     `<text x="26" y="49" font-size="8" font-weight="700" letter-spacing=".6"><tspan class="lv"${glow}>LV ${g.level + 1}</tspan>` +
     `<tspan class="mul" dx="6">×${multiplier(g.level)}</tspan></text>`
+  // Power-ups held, beside the dash charges; a magnet drains as it runs out.
+  let powers = ''
+  if (g.shield) powers += `<g transform="translate(65 36.5) scale(.6)"><use href="#shieldIcon"/></g>`
+  if (t < g.magnetUntil) {
+    const left = g.magnetUntil - t
+    const drain = live ? ` style="animation:drain ${n(left)}ms linear forwards"` : ''
+    powers +=
+      `<g transform="translate(${g.shield ? 77 : 65} 37) scale(.6)"><use href="#magnetIcon"/></g>` +
+      `<rect class="mul drain" x="${g.shield ? 72 : 60}" y="42.5" width="${n((10 * left) / MAGNET_MS)}" height="1.5" rx=".75"${drain}/>`
+  }
   let status = ''
   if (live && view.claude !== 'idle') {
     const text = STATUS_TEXT[view.claude]
@@ -1021,7 +1217,7 @@ function hud(g: Game, view: View, width: number, t: number, now: number, live: b
     `<g ${FONT}><rect class="chip" x="7" y="6" width="${chip}" height="48" rx="9"/>` +
     `<g transform="translate(17 14.5) scale(.75)"><use href="#spark"/></g>` +
     `<text x="26" y="19" font-size="13" font-weight="700" class="txt">${score}</text>` +
-    `<text x="26" y="30" font-size="8" letter-spacing=".6" class="dim">BEST ${g.best}</text>${pips}${level}</g>${status}`
+    `<text x="26" y="30" font-size="8" letter-spacing=".6" class="dim">BEST ${g.best}</text>${pips}${powers}${level}</g>${status}`
   )
 }
 
@@ -1042,7 +1238,7 @@ function card(g: Game, view: View, width: number, now: number) {
     line = PAUSE_TEXT[g.why]
     foot = `${g.score} pts · level ${g.level + 1} · best ${g.best}`
   } else {
-    title = g.crash?.kind === 'fail' ? 'TESTS FAILED' : 'SQUASHED BY A BUG'
+    title = caughtBy(g.crash?.kind).toUpperCase()
     line = g.isNewBest ? `New best · ${g.score} pts` : `${g.score} pts · best ${g.best}`
     foot = `${sentText(view.race) ?? `Reached level ${g.level + 1}`} · ✕ to run again`
   }
@@ -1085,7 +1281,7 @@ export function drawScene(g: Game, view: View, now: number): string {
   const css: string[] = []
   const scene =
     backdrop(width, d, speed, live, css) +
-    world(g, width, d, speed, live, css) +
+    world(g, t, width, d, speed, live, css) +
     ghostRunners(g, t, live, css) +
     runner(g, t, now, live, css) +
     pops(g, now, width)
@@ -1095,7 +1291,7 @@ export function drawScene(g: Game, view: View, now: number): string {
     `<defs>${DEFS}<clipPath id="clip"><rect width="${width}" height="${HEIGHT}" rx="10"/></clipPath>` +
     `<mask id="bands" maskUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${HEIGHT}"><rect width="${width}" height="${HEIGHT}" fill="#fff"/>` +
     `<rect y="${GROUND - 15}" width="${width}" height="2" fill="#000"/><rect y="${GROUND - 10}" width="${width}" height="2.5" fill="#000"/><rect y="${GROUND - 5}" width="${width}" height="3" fill="#000"/></mask></defs>` +
-    `<style>${CSS}${live ? LIVE_CSS : ''}${css.join('')}</style>` +
+    `<style>${CSS}${SKIN_CSS[view.skin ?? 'clay']}${live ? LIVE_CSS : ''}${css.join('')}</style>` +
     `<g clip-path="url(#clip)"><g${shake}>${scene}</g>${hud(g, view, width, t, now, live)}${countdown(g, width, now)}${card(g, view, width, now)}</g>` +
     `<rect class="frame" x=".5" y=".5" width="${width - 1}" height="${HEIGHT - 1}" rx="9.5"/></svg>`
   )
